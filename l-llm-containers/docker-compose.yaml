@@ -1,0 +1,71 @@
+# ai-hub — LAN内ローカルLLM推論ハブ
+# 2コンテナ構成: ollama(GPU/非公開) + gateway(LiteLLM/LAN公開)
+# 設計詳細は ../ARCHITECTURE.md を参照。
+
+services:
+  ollama:                          # container 1: 推論ランタイム(GPU占有)
+    image: ollama/ollama:latest
+    container_name: ai-hub-ollama
+    restart: unless-stopped
+    environment:
+      - OLLAMA_KEEP_ALIVE=-1       # 生成モデルを常駐(コールドスタート回避/低レイテンシ)
+      - OLLAMA_HOST=0.0.0.0        # コンテナ内ネットワーク向けに待受(host へは公開しない)
+    volumes:
+      - ollama_models:/root/.ollama   # 重みを名前付きボリュームに永続(喪失時は再 pull で復旧)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks: [aihub]              # host ポート非公開 = ゲートウェイ経由でのみ到達
+
+  gateway:                         # container 2: LiteLLM Proxy(認証/ルーティング/ログ)
+    image: ghcr.io/berriai/litellm:main-latest
+    container_name: ai-hub-gateway
+    restart: unless-stopped
+    depends_on:
+      ollama:
+        condition: service_healthy
+    ports:
+      # LAN公開ポート 20800(Notion ポート台帳で local-ai-hub に予約: 20800-20899)。
+      # コンテナ内 LiteLLM は :4000 で待受。
+      # WAN 遮断は Windows Firewall / ルータで担保。特定LAN IP に絞るなら
+      # "192.168.x.y:20800:4000" に変更。
+      - "20800:4000"
+    environment:
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}   # .env から注入(コミットしない)
+    volumes:
+      - ./litellm.config.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    networks: [aihub]
+
+  chat:                            # container 3: チャット動作確認アプリ(薄いプロキシ + 静的UI)
+    image: python:3.12-slim
+    container_name: ai-hub-chat
+    restart: unless-stopped
+    depends_on: [gateway]
+    environment:
+      - GATEWAY_URL=http://gateway:4000        # コンテナ内ネットワークで gateway に到達
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}  # 鍵はサーバ側のみ保持(ブラウザに渡さない)
+      - CHAT_MODEL=quality                     # 既定の論理モデル名
+      - PORT=8000
+    volumes:
+      - ./chat:/app:ro
+    command: ["python", "/app/server.py"]
+    ports:
+      - "20801:8000"               # チャットUI LAN公開(Notion 台帳: 20801)
+    networks: [aihub]
+
+volumes:
+  ollama_models:
+
+networks:
+  aihub:

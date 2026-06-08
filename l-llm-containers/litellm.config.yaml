@@ -1,0 +1,36 @@
+# LiteLLM Proxy 設定 — 論理モデル名 → ollama 実体のルーティング。
+# クライアントは論理名(quality / embed / fast)のみ参照。実体は後から差し替え可。
+
+model_list:
+  # 生成(品質優先・常駐)。実体は Q4_K_M(ollama 既定)。
+  # 品質を上げる場合は HuggingFace GGUF 経由の Q5_K_M 等へ差し替え:
+  #   model: ollama_chat/hf.co/unsloth/Qwen3-14B-GGUF:Q5_K_M
+  - model_name: quality
+    litellm_params:
+      model: ollama_chat/qwen3:14b
+      api_base: http://ollama:11434
+
+  # 埋め込み(多言語・常駐)
+  - model_name: embed
+    litellm_params:
+      model: ollama/bge-m3
+      api_base: http://ollama:11434
+
+  # 速度優先の軽量タスク(オンデマンド・ロード前提。常駐させない)。
+  # 初回利用時にロード→コールドスタートを許容。VRAM 律速のため常駐は quality+embed のみ。
+  - model_name: fast
+    litellm_params:
+      model: ollama_chat/llama3.1:8b
+      api_base: http://ollama:11434
+
+  # 比較・動作確認用(オンデマンド)。Gemma4 12B(Blackwell向け NVFP4 量子化, ~10GB)。
+  - model_name: gemma
+    litellm_params:
+      model: ollama_chat/gemma4:12b-nvfp4
+      api_base: http://ollama:11434
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+
+litellm_settings:
+  drop_params: true              # OpenAI 互換外パラメータを無視(クライアント差異を吸収)

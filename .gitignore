@@ -1,0 +1,6 @@
+# 秘密情報(master key 等)はコミットしない
+**/.env
+!**/.env.example
+
+# マシン依存の Claude Code ローカル設定(権限許可リスト等)
+.claude/settings.local.json
