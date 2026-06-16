@@ -10,6 +10,13 @@ services:
     environment:
       - OLLAMA_KEEP_ALIVE=-1       # 生成モデルを常駐(コールドスタート回避/低レイテンシ)
       - OLLAMA_HOST=0.0.0.0        # コンテナ内ネットワーク向けに待受(host へは公開しない)
+      # 受付コンテキスト長(入力+思考+出力の合計窓)。既定 4096 では Qwen3(thinking)で
+      # 途中打ち切りが起きるため引き上げる。32768 = Qwen3 ネイティブ上限。
+      - OLLAMA_CONTEXT_LENGTH=32768
+      # KV キャッシュを q8_0 量子化し VRAM をほぼ半減 → 16GB に 32k 文脈 + 14B + 埋め込みを収める。
+      # 量子化 KV は flash attention 有効が前提(画質劣化はほぼ無し)。
+      - OLLAMA_FLASH_ATTENTION=1
+      - OLLAMA_KV_CACHE_TYPE=q8_0
     volumes:
       - ollama_models:/root/.ollama   # 重みを名前付きボリュームに永続(喪失時は再 pull で復旧)
     deploy:
