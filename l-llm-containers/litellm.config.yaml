@@ -1,5 +1,13 @@
 # LiteLLM Proxy 設定 — 論理モデル名 → ollama 実体のルーティング。
-# クライアントは論理名(quality / embed / fast)のみ参照。実体は後から差し替え可。
+# クライアントは論理名(quality / quality-next / embed)のみ参照。実体は後から差し替え可。
+#
+# model_info はカタログAPI(/v1/catalog)がそのまま返すメタデータ。モデルを追加・差し替えたら
+# ここも更新すること(クライアント向けの説明の単一の情報源)。
+#
+# 重要: ここに書いただけではモデルは使えない。実体を必ず pull すること。
+#   docker exec ai-hub-ollama ollama pull <実体名>
+# 未 pull のまま列挙すると /v1/models には出るのに呼ぶと 500 になる。
+# 未 pull の論理名は下の fast / gemma のようにコメントアウトしておく。
 
 model_list:
   # 生成(品質優先・常駐)。実体は Q4_K_M(ollama 既定)。
@@ -9,28 +17,80 @@ model_list:
     litellm_params:
       model: ollama_chat/qwen3:14b
       api_base: http://ollama:11434
+    model_info:
+      kind: chat
+      purpose: 要約・分類・タグ付け・生成全般(高品質)
+      context_length: 32768
+      thinking:
+        enabled_by_default: true
+        note: 思考は message.reasoning_content に入る。最終回答は message.content。
+        disable: ユーザメッセージ末尾に /no_think を付ける
+        caution: max_tokens が小さいと思考の途中で打ち切られ content が空になる(目安 1024 以上)
+      notes: VRAM をほぼ使い切るため、GPU が他アプリに使われていると 500(out of memory)になることがある
+
+  # 生成(次世代候補・オンデマンド)。Qwen3.5 9B dense = 日本語スコアで旧 14B 超え、
+  # サイズは 6.6GB と約半分。要約/テーマ抽出の評価用に quality と並走させる。
+  # 比較で問題なければ quality の実体をこれに差し替える(クライアントは無変更)。
+  - model_name: quality-next
+    litellm_params:
+      model: ollama_chat/qwen3.5:9b
+      api_base: http://ollama:11434
+    model_info:
+      kind: chat
+      purpose: 日本語の要約・テーマ抽出(quality の後継候補・評価中)
+      context_length: 32768
+      thinking:
+        enabled_by_default: true
+        note: 思考は message.reasoning_content に入る。最終回答は message.content。
+        disable: 'リクエストボディに "think": false (または "reasoning_effort": "none")'
+        caution: /no_think は効かない。抑制しないと簡単な質問でも 1 万トークン超を思考に費やす
+      notes: VRAM 使用は約 6.3GB。embed と同時常駐しても 5GB 程度の余裕がある
 
   # 埋め込み(多言語・常駐)
   - model_name: embed
     litellm_params:
       model: ollama/bge-m3
       api_base: http://ollama:11434
+    model_info:
+      kind: embedding
+      purpose: 類似検索・関連リンク用の埋め込みベクトル
+      dimensions: 1024
+      notes: 多言語(日本語良好)。索引は次元 1024 で設計すること
 
-  # 速度優先の軽量タスク(オンデマンド・ロード前提。常駐させない)。
-  # 初回利用時にロード→コールドスタートを許容。VRAM 律速のため常駐は quality+embed のみ。
-  - model_name: fast
-    litellm_params:
-      model: ollama_chat/llama3.1:8b
-      api_base: http://ollama:11434
-
-  # 比較・動作確認用(オンデマンド)。Gemma4 12B(Blackwell向け NVFP4 量子化, ~10GB)。
-  - model_name: gemma
-    litellm_params:
-      model: ollama_chat/gemma4:12b-nvfp4
-      api_base: http://ollama:11434
+  # --- 以下は実体が未 pull のため無効化中 ---
+  # 有効化するには pull してからコメントを外し、gateway を再起動する。
+  #   docker exec ai-hub-ollama ollama pull llama3.1:8b
+  # - model_name: fast
+  #   litellm_params:
+  #     model: ollama_chat/llama3.1:8b
+  #     api_base: http://ollama:11434
+  #   model_info:
+  #     kind: chat
+  #     purpose: 速度優先の軽量タスク・単純な応答
+  #     context_length: 32768
+  #     thinking:
+  #       enabled_by_default: false
+  #
+  # - model_name: gemma
+  #   litellm_params:
+  #     model: ollama_chat/gemma4:12b-nvfp4
+  #     api_base: http://ollama:11434
+  #   model_info:
+  #     kind: chat
+  #     purpose: 比較・動作確認用の汎用生成
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
+
+  # カタログAPI を唯一の外部窓口(gateway)の下にぶら下げる。catalog コンテナは
+  # host にポートを開かず、ここ経由でのみ到達できる。
+  # forward_headers で Authorization をそのまま渡し、認証は catalog 側でも検証する
+  # (pass-through の auth: true は Enterprise 機能で OSS 版では効かないため)。
+  pass_through_endpoints:
+    - path: "/v1/catalog"
+      target: "http://catalog:8080/catalog"
+      methods: ["GET"]
+      forward_headers: true
 
 litellm_settings:
   drop_params: true              # OpenAI 互換外パラメータを無視(クライアント差異を吸収)

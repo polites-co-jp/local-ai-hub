@@ -37,6 +37,28 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif self.path == "/api/models":
+            # モデル選択肢はカタログAPIから取る。設定に書いてあっても実体が未 pull の
+            # ものは載らないため、UI に「選べるのに 500 になる」項目が出ない。
+            req = urllib.request.Request(
+                GATEWAY + "/v1/catalog",
+                headers={"Authorization": "Bearer " + KEY},
+                method="GET",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    body = resp.read()
+            except (urllib.error.HTTPError, urllib.error.URLError) as e:
+                self.send_response(502)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8"))
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         elif self.path == "/healthz":
             self.send_response(200)
             self.end_headers()

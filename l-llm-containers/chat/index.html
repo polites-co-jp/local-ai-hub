@@ -46,9 +46,7 @@
     <h1>ai-hub chat</h1>
     <label class="hint">model
       <select id="model">
-        <option value="quality">quality (Qwen3 14B)</option>
-        <option value="fast">fast (Llama3.1 8B)</option>
-        <option value="gemma">gemma (Gemma4 12B)</option>
+        <option value="">読み込み中…</option>
       </select>
     </label>
     <span class="spacer"></span>
@@ -72,6 +70,29 @@ const modelEl = document.getElementById("model");
 // 全履歴をクライアントで保持し、毎回まるごと送る
 let history = [];
 let busy = false;
+
+// モデル選択肢はカタログAPI(実体が pull 済みのものだけ)から組み立てる。
+// ハードコードすると未 pull のモデルを選べてしまい 500 になる。
+async function loadModels() {
+  try {
+    const r = await fetch("/api/models");
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const cat = await r.json();
+    const chat = (cat.data || []).filter((m) => m.kind === "chat");
+    if (!chat.length) throw new Error("チャット可能なモデルがありません");
+    modelEl.innerHTML = "";
+    for (const m of chat) {
+      const o = document.createElement("option");
+      o.value = m.id;
+      o.textContent = m.id + " (" + m.backend + ")";
+      o.title = m.purpose || "";
+      modelEl.appendChild(o);
+    }
+  } catch (e) {
+    modelEl.innerHTML = '<option value="">取得失敗: ' + e.message + "</option>";
+  }
+}
+loadModels();
 
 function addBubble(role, text) {
   const el = document.createElement("div");

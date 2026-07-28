@@ -34,7 +34,27 @@ services:
       start_period: 30s
     networks: [aihub]              # host ポート非公開 = ゲートウェイ経由でのみ到達
 
-  gateway:                         # container 2: LiteLLM Proxy(認証/ルーティング/ログ)
+  catalog:                         # container 2: モデルカタログAPI(host 非公開)
+    # 「実際に呼べるモデル」だけを返す。gateway の /model/info(ルーティング定義)と
+    # ollama の /api/tags(pull 済み実体)を突合するため、両方に到達できる必要がある。
+    # 外部へは gateway の pass-through(/v1/catalog)経由でのみ公開する。
+    image: python:3.12-slim
+    container_name: ai-hub-catalog
+    restart: unless-stopped
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      - GATEWAY_URL=http://gateway:4000
+      - OLLAMA_URL=http://ollama:11434
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}   # 自身でも Bearer を検証する
+      - PORT=8080
+    volumes:
+      - ./catalog:/app:ro
+    command: ["python", "/app/server.py"]
+    networks: [aihub]              # host ポート非公開
+
+  gateway:                         # container 3: LiteLLM Proxy(認証/ルーティング/ログ)
     image: ghcr.io/berriai/litellm:main-latest
     container_name: ai-hub-gateway
     restart: unless-stopped
