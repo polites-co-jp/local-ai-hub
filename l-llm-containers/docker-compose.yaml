@@ -1,5 +1,5 @@
 # ai-hub — LAN内ローカルLLM推論ハブ
-# 2コンテナ構成: ollama(GPU/非公開) + gateway(LiteLLM/LAN公開)
+# 5コンテナ構成: ollama(GPU/非公開) + catalog(非公開) + gateway(LiteLLM/LAN公開) + chat + openclaw
 # 設計詳細は ../ARCHITECTURE.md を参照。
 
 services:
@@ -74,7 +74,7 @@ services:
     command: ["--config", "/app/config.yaml", "--port", "4000"]
     networks: [aihub]
 
-  chat:                            # container 3: チャット動作確認アプリ(薄いプロキシ + 静的UI)
+  chat:                            # container 4: チャット動作確認アプリ(薄いプロキシ + 静的UI)
     image: python:3.12-slim
     container_name: ai-hub-chat
     restart: unless-stopped
@@ -82,7 +82,7 @@ services:
     environment:
       - GATEWAY_URL=http://gateway:4000        # コンテナ内ネットワークで gateway に到達
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}  # 鍵はサーバ側のみ保持(ブラウザに渡さない)
-      - CHAT_MODEL=quality                     # 既定の論理モデル名
+      - CHAT_MODEL=quality-next                # 既定の論理モデル名
       - PORT=8000
     volumes:
       - ./chat:/app:ro
@@ -91,8 +91,43 @@ services:
       - "20801:8000"               # チャットUI LAN公開(Notion 台帳: 20801)
     networks: [aihub]
 
+  openclaw:                        # container 5: OpenClaw(AIエージェント + Control UI)
+    # 推論は gateway 経由で quality-next を使う(GPU は使わない)。設定は ./openclaw/openclaw.json。
+    # 設定形式の変更が多いプロジェクトなので、バージョンを固定して明示的に上げる。
+    image: ghcr.io/openclaw/openclaw:2026.9.4
+    container_name: ai-hub-openclaw
+    restart: unless-stopped
+    depends_on: [gateway]
+    environment:
+      - HOME=/home/node
+      - TZ=Asia/Tokyo
+      # 状態(セッション・記憶・ワークスペース)は名前付きボリューム、設定はリポジトリ側に分ける。
+      - OPENCLAW_STATE_DIR=/home/node/.openclaw
+      - OPENCLAW_WORKSPACE_DIR=/home/node/.openclaw/workspace
+      - OPENCLAW_CONFIG_PATH=/home/node/.openclaw-config/openclaw.json
+      - OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN}   # Control UI のログイン用(.env)
+      # gateway への API キー。エージェントはシェルを実行できるため、この値を読める点に注意。
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+    volumes:
+      - openclaw_state:/home/node/.openclaw
+      - ./openclaw:/home/node/.openclaw-config
+    command: ["node", "dist/index.js", "gateway", "--bind", "lan", "--port", "18789"]
+    ports:
+      - "20802:18789"              # Control UI LAN公開(Notion 台帳: 20802)
+    init: true
+    cap_drop: [NET_RAW, NET_ADMIN]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD", "node", "dist/docker-healthcheck.js"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks: [aihub]              # ホストの docker.sock は渡さない(サンドボックス機能は使わない)
+
 volumes:
   ollama_models:
+  openclaw_state:
 
 networks:
   aihub:

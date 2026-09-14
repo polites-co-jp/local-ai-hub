@@ -1,0 +1,72 @@
+// OpenClaw 設定(JSON5)。コンテナ内では OPENCLAW_CONFIG_PATH がこのファイルを指す。
+// Control UI から設定を変えるとこのファイルが書き換わる(git diff で差分を確認できる)。
+// 秘密情報は ${ENV} 参照にして直接書かない(値は ../.env)。
+{
+  gateway: {
+    mode: "local",
+    // コンテナ内 0.0.0.0 で待受。ホストへは compose の 20802 で公開する。
+    bind: "lan",
+    port: 18789,
+    // loopback 以外で待受けるため認証は必須。
+    auth: {
+      mode: "token",
+      token: "${OPENCLAW_GATEWAY_TOKEN}",
+    },
+    controlUi: {
+      // loopback 以外で Control UI を配信するときは、ブラウザの Origin を明示する必要がある。
+      allowedOrigins: [
+        "http://localhost:20802",
+        "http://127.0.0.1:20802",
+        "http://192.168.1.111:20802",
+      ],
+      communityInvite: false,
+    },
+  },
+
+  models: {
+    mode: "merge",
+    providers: {
+      // ai-hub の gateway(LiteLLM)を OpenAI 互換プロバイダとして使う。
+      // ollama へ直接つながず、必ず gateway を経由する(ハブの原則)。
+      aihub: {
+        baseUrl: "http://gateway:4000/v1",
+        apiKey: "${LITELLM_MASTER_KEY}",
+        api: "openai-completions",
+        // ローカルモデルは応答が遅く、モデル積み替え時は数十秒待つことがある。
+        timeoutSeconds: 600,
+        models: [
+          {
+            // litellm.config.yaml の論理名。実体は qwen3.5:9b(num_ctx=65536)。
+            id: "quality-next",
+            name: "quality-next (Qwen3.5 9B)",
+            reasoning: true,
+            input: ["text"],
+            contextWindow: 65536,
+            maxTokens: 8192,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            compat: {
+              supportsReasoningEffort: true,
+            },
+            // Qwen3.5 は /no_think が効かない。思考の停止は reasoning_effort: "none" で行う。
+            thinkingLevelMap: {
+              off: "none",
+              minimal: "low",
+              low: "low",
+              medium: "medium",
+              high: "high",
+            },
+          },
+        ],
+      },
+    },
+  },
+
+  agents: {
+    defaults: {
+      model: { primary: "aihub/quality-next" },
+      // 思考を有効にすると簡単な依頼でも 1 万トークン超を費やすため既定は off。
+      // 必要なときに Control UI で上げる。
+      thinkingDefault: "off",
+    },
+  },
+}

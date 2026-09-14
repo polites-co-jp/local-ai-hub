@@ -4,3 +4,7 @@
 
 # マシン依存の Claude Code ローカル設定(権限許可リスト等)
 .claude/settings.local.json
+
+# OpenClaw が設定ファイルの隣に書く退避コピー(実行時生成)
+l-llm-containers/openclaw/*.last-good
+l-llm-containers/openclaw/*.bak*

@@ -15,14 +15,15 @@ LAN内の汎用ローカルLLM推論ハブ。GPU搭載マシン上で、**OpenAI
                               └─ /v1/catalog ──▶ catalog(実際に呼べるモデルを返す)
 ```
 
-4コンテナ構成(定義は [l-llm-containers/docker-compose.yaml](l-llm-containers/docker-compose.yaml))。
+5コンテナ構成(定義は [l-llm-containers/docker-compose.yaml](l-llm-containers/docker-compose.yaml))。
 
 | コンテナ | 役割 | ポート | 公開 |
 |---|---|---|---|
 | `ai-hub-ollama` | 推論ランタイム(GPU占有)。OpenAI互換 | `11434`(内部のみ) | 非公開 |
 | `ai-hub-catalog` | モデルカタログAPI。実際に呼べるモデルだけを返す | `8080`(内部のみ) | 非公開(gateway経由) |
-| `ai-hub-gateway` | LiteLLM Proxy。唯一の外部窓口。認証/論理名ルーティング/ログ | host `20800` | LAN公開 |
-| `ai-hub-chat` | 動作確認用の薄いチャットUI | host `20801` | LAN公開 |
+| `ai-hub-gateway` | LiteLLM Proxy。推論APIの唯一の窓口。認証/論理名ルーティング/ログ | host `20800` | LAN公開 |
+| `ai-hub-chat` | 動作確認用の薄いチャットUI(既定モデル `quality-next`) | host `20801` | LAN公開 |
+| `ai-hub-openclaw` | OpenClaw(AIエージェント)と管理画面 Control UI。gateway 経由で `quality-next` を使う | host `20802` | LAN公開 |
 
 実行環境: Windows 11 + NVIDIA RTX 5060 Ti 16GB / Docker Desktop(WSL2)+ NVIDIA Container Toolkit。
 

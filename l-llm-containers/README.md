@@ -2,7 +2,7 @@
 
 LAN内ローカルLLM推論ハブのコンテナ定義。設計は [../ARCHITECTURE.md](../ARCHITECTURE.md) を参照。
 
-- `docker-compose.yaml` … ollama(GPU/非公開) + gateway(LiteLLM/LAN公開 `:20800`)
+- `docker-compose.yaml` … ollama(GPU/非公開) + catalog + gateway(LiteLLM/LAN公開 `:20800`) + chat(`:20801`) + openclaw(`:20802`)
 - `litellm.config.yaml` … 論理モデル名 `quality` / `embed` / `fast` のルーティング
 - `.env` … `LITELLM_MASTER_KEY`(コミットしない / `.env.example` をコピーして作成)
 
@@ -12,9 +12,10 @@ LAN内ローカルLLM推論ハブのコンテナ定義。設計は [../ARCHITECT
 |---|---|---|---|
 | gateway (LiteLLM) | `20800` | `4000` | LAN公開 |
 | chat (動作確認UI) | `20801` | `8000` | LAN公開 |
+| openclaw (Control UI) | `20802` | `18789` | LAN公開 |
 | ollama | ― | `11434` | コンテナ内のみ(非公開) |
 
-> ポート台帳(Notion): local-ai-hub に `20800-20899` を予約済み。
+> ポート台帳(Notion): local-ai-hub に `20800-20899` を予約済み。写しは [../docs/port-registry.md](../docs/port-registry.md)。
 
 ## チャット動作確認アプリ
 
@@ -25,7 +26,29 @@ docker compose up -d chat
 ```
 
 ブラウザで `http://localhost:20801`(LAN内からは `http://<このマシンのLAN IP>:20801`)。
-モデルは画面上部で `quality` / `fast` を切替可。応答はストリーミング表示(GPU未使用時は低速)。
+既定モデルは `quality-next`。画面上部でカタログAPIに載っているモデルに切替可。応答はストリーミング表示(GPU未使用時は低速)。
+
+## OpenClaw(AIエージェント + Control UI)
+
+`openclaw/openclaw.json` … OpenClaw の設定(JSON5)。推論プロバイダ `aihub` として gateway(`http://gateway:4000/v1`)を登録し、既定モデルを `aihub/quality-next`、思考の既定を `off` にしている。
+セッション・記憶・ワークスペースはボリューム `openclaw_state` に残る。
+
+```powershell
+docker compose up -d openclaw
+```
+
+1. ブラウザで `http://localhost:20802`(LAN内からは `http://192.168.1.111:20802`)を開く。
+2. `.env` の `OPENCLAW_GATEWAY_TOKEN` を入力して接続する。
+3. `pairing required` と出たら、ホストで承認する(ブラウザごとに初回のみ):
+
+```powershell
+docker exec ai-hub-openclaw node dist/index.js devices list
+docker exec ai-hub-openclaw node dist/index.js devices approve <requestId>
+```
+
+- 開けるのは `gateway.controlUi.allowedOrigins` に書いた Origin だけ。別のホスト名や IP で開くならそこへ追加する。
+- CLI からエージェントを動かす: `docker exec ai-hub-openclaw node dist/index.js agent -m "こんにちは"`
+- バージョンは compose で固定している。上げるときは `image` のタグを書き換えて `docker compose up -d openclaw`。
 
 ## 初回セットアップ
 

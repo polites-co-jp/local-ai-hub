@@ -88,6 +88,7 @@ async function loadModels() {
       o.title = m.purpose || "";
       modelEl.appendChild(o);
     }
+    if (chat.some((m) => m.id === cat.default)) modelEl.value = cat.default;
   } catch (e) {
     modelEl.innerHTML = '<option value="">取得失敗: ' + e.message + "</option>";
   }

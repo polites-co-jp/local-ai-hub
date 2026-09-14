@@ -11,7 +11,7 @@
 - 公開範囲は**プライベートLAN内のみ**。インターネット非公開。アクセス制御はAPIキー(LiteLLM master key)。
 - アプリ固有ロジック(取り込み・推薦等)はクライアント側の責務。ハブは「推論を返す」だけ。
 
-## 構成（4コンテナ）
+## 構成（5コンテナ）
 
 すべて [l-llm-containers/docker-compose.yaml](l-llm-containers/docker-compose.yaml) で定義。
 
@@ -19,10 +19,11 @@
 |---|---|---|---|
 | `ai-hub-ollama` | 推論ランタイム(GPU占有)。OpenAI互換 | `11434`(内部のみ) | 非公開 |
 | `ai-hub-catalog` | モデルカタログAPI。実際に呼べるモデルだけを返す(Python標準ライブラリのみ) | `8080`(内部のみ) | 非公開(gateway経由) |
-| `ai-hub-gateway` | LiteLLM Proxy。唯一の外部窓口。認証/論理名ルーティング/ログ | host `20800`→`4000` | LAN公開 |
-| `ai-hub-chat` | 動作確認用の薄いチャットUI(Python標準ライブラリのみ) | host `20801`→`8000` | LAN公開 |
+| `ai-hub-gateway` | LiteLLM Proxy。推論APIの唯一の窓口。認証/論理名ルーティング/ログ | host `20800`→`4000` | LAN公開 |
+| `ai-hub-chat` | 動作確認用の薄いチャットUI(Python標準ライブラリのみ)。既定モデルは `quality-next` | host `20801`→`8000` | LAN公開 |
+| `ai-hub-openclaw` | OpenClaw(AIエージェント)と管理画面 Control UI。推論は gateway 経由で `quality-next` を使うクライアント | host `20802`→`18789` | LAN公開(トークン+ペアリング) |
 
-データフロー: `クライアント → gateway(:20800, APIキー認証) → ollama(:11434) → 応答`。ollama は直接公開しない（必ずゲートウェイ経由）。カタログAPIは gateway の pass-through で `/v1/catalog` として公開する。
+データフロー: `クライアント → gateway(:20800, APIキー認証) → ollama(:11434) → 応答`。ollama は直接公開しない（必ずゲートウェイ経由）。カタログAPIは gateway の pass-through で `/v1/catalog` として公開する。OpenClaw もハブの利用者の1つで、`http://gateway:4000/v1` を呼ぶ。ハブ自体はステートレスのままで、会話や記憶を持つのは OpenClaw 側。
 
 実行環境: Windows + NVIDIA RTX 5060 Ti 16GB / Docker Desktop(WSL2) + NVIDIA Container Toolkit。
 
@@ -34,13 +35,14 @@ local-ai-hub/
 ├── ARCHITECTURE.md            # 設計 & 連携手順書(構成/VRAM配分/カタログAPI/接続手順)
 ├── ai-hub-client-guide.md     # 外部クライアント実装者向けの連携手順書(サンプル/エラー早見表)
 └── l-llm-containers/          # コンテナ定義一式
-    ├── docker-compose.yaml    # 4コンテナ定義 + ollama環境変数(コンテキスト長等)
+    ├── docker-compose.yaml    # 5コンテナ定義 + ollama環境変数(コンテキスト長等)
     ├── litellm.config.yaml    # 論理モデル名 → ollama実体のルーティング + model_info(カタログの情報源)
     ├── .env                   # LITELLM_MASTER_KEY(コミット禁止 / .gitignore済み)
     ├── .env.example           # .envのテンプレート
     ├── README.md              # セットアップ/運用手順
     ├── catalog/               # カタログAPI(server.py = 実行可能モデルの突合)
-    └── chat/                  # 動作確認UI(server.py = 薄いプロキシ, index.html)
+    ├── chat/                  # 動作確認UI(server.py = 薄いプロキシ, index.html)
+    └── openclaw/              # OpenClaw 設定(openclaw.json = JSON5。状態はボリューム openclaw_state)
 ```
 
 ## よく使うコマンド
@@ -71,10 +73,12 @@ curl http://localhost:20800/health/liveliness   # ゲートウェイ疎通(キ�
 - **モデルは手動 pull が必要**。`docker compose up` ではモデルは取得されない。ボリューム `l-llm-containers_ollama_models` が空（`ollama list` が空）なら、上記 pull で復旧する。コンテナ再作成でボリューム内容が消える事例があったため、API不調時はまず `ollama list` を確認。
 - **コンテキスト長は [docker-compose.yaml](l-llm-containers/docker-compose.yaml) の ollama 環境変数で制御**:
   - `OLLAMA_CONTEXT_LENGTH=32768` … 受付窓(入力+思考+出力の合計)。既定4096では Qwen3(thinking)が途中打ち切りになるため引き上げ済み。32768 は Qwen3 ネイティブ上限。
+  - **例外: `quality-next` だけは [litellm.config.yaml](l-llm-containers/litellm.config.yaml) の `num_ctx: 65536` で 64k に上書き**している(OpenClaw がローカルモデルに 64k 以上を推奨するため)。`ollama ps` の CONTEXT 列が 65536 になる。
   - `OLLAMA_KV_CACHE_TYPE=q8_0` + `OLLAMA_FLASH_ATTENTION=1` … KVキャッシュを量子化しVRAM半減。これが無いと16GBに32k文脈が収まらない。
 - **VRAM予算(16GB / 16311 MiB)**: 実測(nvidia-smi, デスクトップアプリ込みの総使用量)は以下。
   - `quality`(qwen3:14b, 11GB) + bge-m3(664MB) = **15526 MiB / 16311 MiB(空き 785MB)**。ほぼ上限で、**ブラウザ等のGPU使用が増えると `quality` のロードが `cudaMalloc failed: out of memory` で 500 になる**(実際に発生済み)。
   - `quality-next`(qwen3.5:9b, 6.3GB) + bge-m3(664MB) = **11259 MiB / 16311 MiB(空き 5GB)**。余裕あり。
+  - `quality-next` を 64k にした後(qwen3.5:9b が 7.3GB) + bge-m3 = **11810〜11866 MiB / 16311 MiB(空き 4.4GB)**(2026-09-14 実測)。
   - モデル追加時はこの予算を超えないこと。常駐は最小限(生成1+埋め込み1)、追加はオンデマンド。
 - **生成モデルの切り替えは退避+再ロードを伴う**。`OLLAMA_KEEP_ALIVE=-1` で常駐させているが、別の生成モデルを要求すると ollama が LRU を退避して積み替える(コールドスタート数十秒)。VRAM に余裕が無いと退避が間に合わず OOM になる。生成モデルは実質1つだけ常駐できると考える。
 - **`quality`(Qwen3 14B)は推論モデル**。応答に思考過程が含まれ `message.reasoning_content` に入る。最終回答は `message.content`。`max_tokens` が小さいと思考の途中で打ち切られ `content` が空になる。
@@ -83,4 +87,6 @@ curl http://localhost:20800/health/liveliness   # ゲートウェイ疎通(キ�
 - **論理モデルの追加/差し替えは [litellm.config.yaml](l-llm-containers/litellm.config.yaml)** で行う。クライアントは論理名のみ参照するため実体差し替えの影響を受けない。追加時は `model_info`(用途・thinking の止め方・次元など)も書く。**カタログAPIが返すクライアント向け説明はここが単一の情報源**。
 - **`/v1/models` は嘘をつく**。設定に書いた論理名を返すだけで実体の pull 状況を見ないため、未 pull のモデルも一覧に出て呼ぶと 500 になる。**実際に呼べるモデルは `/v1/catalog`**(catalog コンテナが ollama の `/api/tags` と突合)。未 pull の論理名は設定でコメントアウトしておく。
 - **設定ファイルはバインドマウントなので `docker compose up -d` では再読み込みされない**。`litellm.config.yaml` を変えたら `docker restart ai-hub-gateway`、`catalog/server.py` を変えたら `docker restart ai-hub-catalog`。
+- **OpenClaw の Control UI(`:20802`)は初回にトークンとブラウザごとのペアリング承認が要る**。トークンは [.env](l-llm-containers/.env) の `OPENCLAW_GATEWAY_TOKEN`。loopback からの接続は自動承認されるが、Docker のポート転送を経由すると localhost から開いても loopback と見なされず、承認待ちになることがある。`docker exec ai-hub-openclaw node dist/index.js devices list` で requestId を見て `devices approve <requestId>` で承認する。
+- **OpenClaw の設定は [openclaw/openclaw.json](l-llm-containers/openclaw/openclaw.json)**(バインドマウント)。Control UI から設定を変えるとこのファイルが書き換わる。秘密は `${ENV}` 参照にして直接書かない。思考の既定は `off`(`reasoning_effort: "none"` に変換される)。OpenClaw のエージェントはコンテナ内でシェルを実行でき、環境変数の `LITELLM_MASTER_KEY` も読める。
 - **litellm.config.yaml の YAML に注意**。値に `": "` を含む文字列(例: `"think": false` という説明文)はクォートしないと `ScannerError` で gateway が起動しなくなる。

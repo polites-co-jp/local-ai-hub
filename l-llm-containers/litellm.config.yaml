@@ -31,14 +31,17 @@ model_list:
   # 生成(次世代候補・オンデマンド)。Qwen3.5 9B dense = 日本語スコアで旧 14B 超え、
   # サイズは 6.6GB と約半分。要約/テーマ抽出の評価用に quality と並走させる。
   # 比較で問題なければ quality の実体をこれに差し替える(クライアントは無変更)。
+  # チャットUI と OpenClaw の既定モデル。OpenClaw はローカルモデルに 64k 以上を推奨するため、
+  # このモデルだけ num_ctx=65536 で OLLAMA_CONTEXT_LENGTH(32k)を上書きする。
   - model_name: quality-next
     litellm_params:
       model: ollama_chat/qwen3.5:9b
       api_base: http://ollama:11434
+      num_ctx: 65536
     model_info:
       kind: chat
-      purpose: 日本語の要約・テーマ抽出(quality の後継候補・評価中)
-      context_length: 32768
+      purpose: 日本語の要約・テーマ抽出、OpenClaw のエージェント実行(ハブの既定モデル)
+      context_length: 65536
       thinking:
         enabled_by_default: true
         note: 思考は message.reasoning_content に入る。最終回答は message.content。

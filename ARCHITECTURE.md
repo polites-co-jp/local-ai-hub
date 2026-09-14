@@ -42,7 +42,7 @@
 | 埋め込みモデル | **bge-m3**(多言語, 1024次元) | ollama標準。JP良好 |
 | 公開範囲 | **プライベートLAN内のみ** | 実アクセス制御は APIキー |
 
-### コンテナ(4つ)
+### コンテナ(5つ)
 
 すべて [l-llm-containers/docker-compose.yaml](l-llm-containers/docker-compose.yaml) で定義。
 
@@ -50,10 +50,11 @@
 |---|---|---|---|
 | `ai-hub-ollama` | 推論ランタイム(GPU占有) | `11434`(内部のみ) | 非公開 |
 | `ai-hub-catalog` | モデルカタログAPI。実行可能なモデルだけを返す | `8080`(内部のみ) | 非公開(gateway経由) |
-| `ai-hub-gateway` | LiteLLM Proxy。**唯一の外部窓口**。認証/論理名ルーティング/ログ | host `20800`→`4000` | LAN公開 |
-| `ai-hub-chat` | 動作確認用の薄いチャットUI | host `20801`→`8000` | LAN公開 |
+| `ai-hub-gateway` | LiteLLM Proxy。**推論APIの唯一の窓口**。認証/論理名ルーティング/ログ | host `20800`→`4000` | LAN公開 |
+| `ai-hub-chat` | 動作確認用の薄いチャットUI(既定モデル `quality-next`) | host `20801`→`8000` | LAN公開 |
+| `ai-hub-openclaw` | OpenClaw(AIエージェント)と管理画面 Control UI。ハブを使うクライアントの1つ | host `20802`→`18789` | LAN公開(トークン+ペアリング) |
 
-ホスト公開ポートは **20800-20899** を local-ai-hub 用に予約(Notion ポート台帳)。現在の使用は 20800 / 20801。
+ホスト公開ポートは **20800-20899** を local-ai-hub 用に予約(Notion ポート台帳)。現在の使用は 20800 / 20801 / 20802。写しは [docs/port-registry.md](docs/port-registry.md)。
 
 ### データフロー
 
@@ -90,6 +91,7 @@
 | **gateway (LiteLLM)** | 唯一の外部窓口。APIキー認証・論理名ルーティング・使用ログ・OpenAI互換の統一契約 | ─ | LAN `:20800` |
 | **catalog** | gateway の `/model/info` と ollama の `/api/tags` を突合し、**実際に呼べるモデルだけ**を返す | ─ | gateway の pass-through 経由のみ |
 | **chat** | 動作確認用の薄いUI。モデル選択肢はカタログAPIから動的取得 | ─ | LAN `:20801` |
+| **openclaw** | AIエージェント(ツール実行・セッション・記憶を持つ)と管理画面。推論は `http://gateway:4000/v1` の `quality-next` を呼ぶ。設定は `l-llm-containers/openclaw/openclaw.json`、状態はボリューム `openclaw_state` | ─ | LAN `:20802` |
 
 **設計上の要点**
 - ollama 自体がAPIを持つが、**直接公開しない**。認証もルーティングもログも無い素のランタイムをLANに晒さない。
@@ -116,8 +118,10 @@
 |---|---|---|---|
 | `quality`(11GB) + `embed`(664MB) | **15526 MiB** | 785 MB | ⚠️ ほぼ上限。ブラウザ等のGPU使用が増えると `cudaMalloc failed: out of memory` で 500 になる(実際に発生) |
 | `quality-next`(6.3GB) + `embed`(664MB) | **11259 MiB** | 5052 MB | ✅ 余裕あり |
+| `quality-next` 64k(7.3GB) + `embed`(664MB) | **11810〜11866 MiB** | 約 4.4GB | ✅ 余裕あり(2026-09-14 実測。現行の設定) |
 
 - **コンテキスト長**:`OLLAMA_CONTEXT_LENGTH=32768`。既定 4096 では thinking モデルが途中打ち切りになるため引き上げ済み。`OLLAMA_KV_CACHE_TYPE=q8_0` + `OLLAMA_FLASH_ATTENTION=1` で KV キャッシュを量子化して 16GB に収める。
+- **`quality-next` だけは 64k**。OpenClaw がローカルモデルに 64k 以上を推奨するため、`litellm.config.yaml` の `num_ctx: 65536` で上書きしている。
 - **生成モデルは実質1つしか常駐できない**。別の生成モデルを要求すると ollama が LRU を退避して積み替える(コールドスタート数十秒)。VRAM に余裕が無いと退避が間に合わず OOM になる。
 - **常駐は最小限(生成1 + 埋め込み1)**を原則とし、追加はオンデマンド。
 - **⚠️ Whisper は本ハブに常駐させない**。VRAM 余白が薄い。
@@ -177,8 +181,8 @@ Authorization: Bearer <LITELLM_MASTER_KEY>
       "endpoint": "/v1/chat/completions",
       "installed": true,
       "backend": "qwen3.5:9b",
-      "purpose": "日本語の要約・テーマ抽出(quality の後継候補・評価中)",
-      "context_length": 32768,
+      "purpose": "日本語の要約・テーマ抽出、OpenClaw のエージェント実行(ハブの既定モデル)",
+      "context_length": 65536,
       "thinking": {
         "enabled_by_default": true,
         "disable": "リクエストボディに \"think\": false (または \"reasoning_effort\": \"none\")",

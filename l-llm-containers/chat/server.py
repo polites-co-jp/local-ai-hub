@@ -47,8 +47,11 @@ class Handler(BaseHTTPRequestHandler):
             )
             try:
                 with urllib.request.urlopen(req, timeout=30) as resp:
-                    body = resp.read()
-            except (urllib.error.HTTPError, urllib.error.URLError) as e:
+                    catalog = json.loads(resp.read())
+                # 画面が初期選択に使う既定モデル(CHAT_MODEL)を添える
+                catalog["default"] = DEFAULT_MODEL
+                body = json.dumps(catalog, ensure_ascii=False).encode("utf-8")
+            except (urllib.error.HTTPError, urllib.error.URLError, ValueError) as e:
                 self.send_response(502)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.end_headers()
