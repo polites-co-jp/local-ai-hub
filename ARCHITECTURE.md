@@ -43,7 +43,7 @@
 | 埋め込みモデル | **bge-m3**(多言語, 1024次元) | ollama標準。JP良好 |
 | 公開範囲 | **プライベートLAN内のみ** | 実アクセス制御は APIキー |
 
-### コンテナ(6つ)
+### コンテナ(7つ)
 
 すべて [l-llm-containers/docker-compose.yaml](l-llm-containers/docker-compose.yaml) で定義。
 
@@ -52,6 +52,7 @@
 | `ai-hub-ollama` | 埋め込みランタイム(bge-m3 を常駐) | `11434`(内部のみ) | 非公開 |
 | `ai-hub-strata` | 生成ランタイム(Strata。論理名 `large`)と Web UI | host `20803`→`8080` | LAN公開(API キー必須) |
 | `ai-hub-catalog` | モデルカタログAPI。実行可能なモデルだけを返す | `8080`(内部のみ) | 非公開(gateway経由) |
+| `ai-hub-strata-relay` | Strata ネイティブ API の中継。ハブの鍵を検証し Strata の鍵に付け替える | `8090`(内部のみ) | 非公開(gateway の `/strata/*` 経由) |
 | `ai-hub-gateway` | LiteLLM Proxy。**推論APIの窓口**。認証/論理名ルーティング/ログ | host `20800`→`4000` | LAN公開 |
 | `ai-hub-chat` | 動作確認用の薄いチャットUI(既定モデル `large`) | host `20801`→`8000` | LAN公開 |
 | `ai-hub-openclaw` | OpenClaw(AIエージェント)と管理画面 Control UI。ハブを使うクライアントの1つ | host `20802`→`18789` | LAN公開(トークン+ペアリング) |
@@ -93,7 +94,8 @@
 | **strata** | 生成モデル(`large`)の推論。重みはボリューム `ai-hub-strata-data`(Docker のデータ領域 = D: の NVMe) | ✅ 共有(VRAM の大半) | LAN `:20803`(API キー必須) |
 | **ollama** | 埋め込みモデル(`embed`)の常駐・推論。重みは名前付きボリュームに永続 | ✅ 共有(約 0.7GB) | コンテナ内のみ(直接公開しない) |
 | **gateway (LiteLLM)** | 推論APIの窓口。APIキー認証・論理名ルーティング・使用ログ・OpenAI互換の統一契約 | ─ | LAN `:20800` |
-| **catalog** | gateway の `/model/info` と ollama の `/api/tags`・strata の `/v1/models` を突合し、**実際に呼べるモデルだけ**を返す | ─ | gateway の pass-through 経由のみ |
+| **catalog** | gateway の `/model/info` と ollama の `/api/tags`・strata の `/v1/models` を突合し、**実際に呼べるモデルだけ**を返す。Strata の `/props` から文脈長・画像入力・tool 対応・サンプリング既定値を読んで載せる | ─ | gateway の pass-through 経由のみ |
+| **strata-relay** | Strata のネイティブ API(Anthropic Messages / Responses / Chat Completions / props / status / slots / metrics / MCP 一覧)を `/strata/*` として中継する。ハブの master key を検証してから Strata の鍵に付け替え、思考の既定(なし)を補い、SSE はそのまま流す | ─ | gateway の pass-through 経由のみ |
 | **chat** | 動作確認用の薄いUI。モデル選択肢はカタログAPIから動的取得 | ─ | LAN `:20801` |
 | **openclaw** | AIエージェント(ツール実行・セッション・記憶を持つ)と管理画面。推論は `http://gateway:4000/v1` の `large` を呼ぶ。設定は `l-llm-containers/openclaw/openclaw.json`、状態はボリューム `openclaw_state` | ─ | LAN `:20802` |
 
@@ -159,11 +161,12 @@ LiteLLM 標準の `GET /v1/models` は **`litellm.config.yaml` に書かれた�
 
 ### 5.2 `GET /v1/catalog` — 一覧されたものは必ず呼べる
 
-catalog サービスが 3 つの権威情報を突合して返す:
+catalog サービスが 4 つの権威情報を突合して返す:
 
 1. gateway `/model/info` … 論理名 → 実体 のルーティング定義
 2. ollama `/api/tags` … 実際に pull 済みの実体
 3. strata `/v1/models` … Strata に読み込まれて応答できる実体(`api_base` が strata の論理名だけ)。Strata が停止中・読み込み中なら `large` は一覧から消える
+4. strata `/props` … Strata の実際の設定。`context_length`・`input_modalities`・`capabilities`・`sampling_defaults`・`parallel_requests`・`engine` を手書きの `model_info` より優先して載せる。Strata の起動設定(文脈長・画像入力など)を変えると、カタログは自動で追従する
 
 ```
 GET http://192.168.1.111:20800/v1/catalog
@@ -191,7 +194,14 @@ Authorization: Bearer <LITELLM_MASTER_KEY>
         "enable": "リクエストボディに \"reasoning_effort\": \"low\" / \"medium\" / \"high\"",
         "disable": "既定で無効(ハブが \"reasoning_effort\": \"none\" を補う)"
       },
-      "notes": "生成 50〜78 tok/s、prefill 1200〜1600 tok/s(2026-11-13 実測)。同時に処理するのは1リクエストだけで、後続は待たされる。長文は読み込みに時間がかかる(1.5 万トークンで約 10 秒)"
+      "options": { "reasoning_effort": "...", "reasoning_budget_tokens": "...", "sampling": "...", "images": "...", "tools": "..." },
+      "native_api": { "base_path": "/strata", "auth": "...", "endpoints": { "messages": "POST /strata/v1/messages(...)" } },
+      "notes": "生成 48〜79 tok/s、prefill 1200〜1700 tok/s(2026-11-13 実測)。...",
+      "input_modalities": ["text", "image"],
+      "capabilities": { "tools": true, "parallel_tool_calls": true, "system_role": true, "vision": true },
+      "sampling_defaults": { "temperature": 1.0, "top_p": 0.95, "top_k": 20 },
+      "parallel_requests": 1,
+      "engine": "Strata 0.1.59"
     },
     {
       "id": "embed",
@@ -220,6 +230,11 @@ Authorization: Bearer <LITELLM_MASTER_KEY>
 | `backend` | 実体名。**参考情報**。ハブ側で差し替えるのでクライアントは依存しないこと |
 | `context_length` | 入力 + 思考 + 出力 の合計上限 |
 | `thinking` | 思考モデルか、思考の止め方、注意点。**モデルごとに止め方が違うので必ず読む** |
+| `options` | そのモデルで使えるリクエストオプション(Strata 固有のものを含む)。§6.1 |
+| `native_api` | Strata のネイティブ API の入口(`/strata/*`)と使えるエンドポイント。§6.2 |
+| `input_modalities` / `capabilities` | 実際に受け付ける入力(`image` があれば画像を送れる)と、tool・並列 tool call などの対応。Strata の設定から自動で載る |
+| `sampling_defaults` | サンプリングを省略したときにモデルが使う値 |
+| `parallel_requests` | 同時に処理できるリクエスト数(1 なら順番待ち) |
 | `dimensions` | 埋め込みの次元(索引設計に使う) |
 
 **診断用**: `GET /v1/catalog?all=1` は未インストールのものも `installed: false` と `unavailable_reason` 付きで返す。設定に書いたのに使えないモデルを切り分けるときに使う。
@@ -271,6 +286,52 @@ POST /v1/embeddings
 { "model": "embed", "input": "ベクトル化したいテキスト" }
 ```
 → `data[0].embedding` に **1024次元**の float 配列。
+
+### 6.1 Strata のオプション(`large`)
+
+`/v1/chat/completions` に書けば、そのまま Strata まで届く(gateway は落とさない。2026-11-13 に実測で確認)。一覧はカタログの `options` にもある。
+
+| オプション | 内容 |
+|---|---|
+| `reasoning_effort` | `"none"` / `"low"` / `"medium"` / `"high"`。ハブの既定は `none` |
+| `reasoning` | `{"effort": ...}`。Responses 形式の書き方で、意味は上と同じ |
+| `chat_template_kwargs` | `{"enable_thinking": false}` で思考を止める |
+| `reasoning_budget_tokens` | 思考の上限トークン数。超えると短い締めの一文で思考を終えて回答する(実測: 64 を指定すると思考が 744〜916 文字 → 約 250 文字) |
+| サンプリング | `temperature` / `top_p` / `top_k`(1〜64) / `min_p` / `seed` / `repetition_penalty` / `presence_penalty` / `frequency_penalty`。`seed` や `temperature: 0` でも出力は完全には固定されない |
+| 画像 | `messages[].content` に `{"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}` |
+| tools | `tools` / `tool_choice` / 並列 tool call。宣言していない tool の呼び出しはテキストのまま返り、応答の `strata_rejected_tool_calls` に名前が載る |
+| 応答の追加フィールド | `timings`(prefill・生成の時間と速度)、`strata_rejected_tool_calls` |
+
+### 6.2 Strata のネイティブ API(`/strata/*`)
+
+gateway の `/strata/*` は、strata-relay を通して Strata の API を**変換せずに**出す。認証はハブと同じ API キー(`Authorization: Bearer` か、Anthropic SDK の `x-api-key`)。どの API でも、思考の強さを指定しなければ「思考なし」を補う。
+
+| メソッド | パス | 用途 |
+|---|---|---|
+| POST | `/strata/v1/chat/completions` | OpenAI Chat Completions(LiteLLM を通らない) |
+| POST | `/strata/v1/messages` | **Anthropic Messages**。`thinking`(`disabled` / `enabled` + `budget_tokens`)、`output_config.effort`、ストリーム、tools |
+| POST | `/strata/v1/messages/count_tokens` | Anthropic のトークン数計算 |
+| POST | `/strata/v1/responses` | **OpenAI Responses**(ステートレス。前の応答 ID での継続はできない) |
+| GET | `/strata/v1/models` | 読み込み済みモデル(文脈長・入力形式) |
+| GET | `/strata/props` | 文脈長・テンプレートの能力・サンプリング既定値・エンジン版 |
+| GET | `/strata/status` | 処理中か、待ち行列の長さ、今の段階 |
+| GET | `/strata/slots` | スロットごとの状態 |
+| GET | `/strata/metrics` | 監視値(JSON)。`Accept: text/plain` か `?format=prometheus` で Prometheus 形式(vLLM 互換の名前) |
+| GET | `/strata/mcp-servers` | Strata に登録した MCP サーバとツール(Strata 上の `GET /mcp`。LiteLLM が `/strata/mcp` を横取りするため別名) |
+
+- `model` はどの名前でもよい(Strata は読み込み済みの1モデルで答える)。`large` を推奨。
+- `/v1/messages` と `/v1/responses` は gateway の素の口(LiteLLM の変換)でも呼べる。Strata 固有の扱い(`thinking.budget_tokens` など)を確実に効かせたいなら `/strata/*` を使う。
+- 会話の保存・復元(`POST /slots`)など、サーバの状態を書き換える API は中継しない(404)。
+- ストリームを途中で切断すると、Strata は約1秒で生成を止める(実測)。
+
+Anthropic SDK の例:
+```python
+import anthropic
+client = anthropic.Anthropic(base_url=f"{AI_HUB_URL}/strata", api_key=AI_HUB_KEY)
+r = client.messages.create(model="large", max_tokens=2048,
+                           messages=[{"role": "user", "content": "……を3行で要約して"}])
+print(r.content[0].text)
+```
 
 ### 必ず押さえる挙動
 

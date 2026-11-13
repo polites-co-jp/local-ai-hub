@@ -16,13 +16,14 @@ LAN内の汎用ローカルLLM推論ハブ。GPU搭載マシン上で、**OpenAI
                               └─ /v1/catalog ──▶ catalog(実際に呼べるモデルを返す)
 ```
 
-6コンテナ構成(定義は [l-llm-containers/docker-compose.yaml](l-llm-containers/docker-compose.yaml))。
+7コンテナ構成(定義は [l-llm-containers/docker-compose.yaml](l-llm-containers/docker-compose.yaml))。
 
 | コンテナ | 役割 | ポート | 公開 |
 |---|---|---|---|
 | `ai-hub-ollama` | 埋め込みランタイム(bge-m3 を常駐) | `11434`(内部のみ) | 非公開 |
 | `ai-hub-strata` | 生成ランタイム(Strata。論理名 `large`)と Web UI | host `20803` | LAN公開(API キー必須) |
 | `ai-hub-catalog` | モデルカタログAPI。実際に呼べるモデルだけを返す | `8080`(内部のみ) | 非公開(gateway経由) |
+| `ai-hub-strata-relay` | Strata ネイティブ API(Anthropic Messages / Responses / 状態取得)の中継。`/strata/*` | `8090`(内部のみ) | 非公開(gateway経由) |
 | `ai-hub-gateway` | LiteLLM Proxy。推論APIの窓口。認証/論理名ルーティング/ログ | host `20800` | LAN公開 |
 | `ai-hub-chat` | 動作確認用の薄いチャットUI(既定モデル `large`) | host `20801` | LAN公開 |
 | `ai-hub-openclaw` | OpenClaw(AIエージェント)と管理画面 Control UI。gateway 経由で `large` を使う | host `20802` | LAN公開 |
@@ -63,6 +64,8 @@ print(r.choices[0].message.content)
 # 埋め込み(1024次元)
 v = client.embeddings.create(model="embed", input="テキスト").data[0].embedding
 ```
+
+Anthropic 形式(`/strata/v1/messages`)や OpenAI Responses(`/strata/v1/responses`)、Strata の状態(`/strata/status`・`/strata/metrics`)も、同じ API キーで使えます。思考の上限(`reasoning_budget_tokens`)や画像入力など、Strata のオプションの一覧は `GET /v1/catalog` の `options` と [ARCHITECTURE.md](ARCHITECTURE.md) §6.1–6.2 を参照。
 
 > **注意**: `large` は既定で思考しません。考えさせたいときだけ `reasoning_effort="low" / "medium" / "high"` を付けます。処理は1リクエストずつで、長文の入力は読み込みに時間がかかります。`/v1/models` は実体の状態を見ないため、**実際に呼べるモデルの一覧は `/v1/catalog`** を使います。
 

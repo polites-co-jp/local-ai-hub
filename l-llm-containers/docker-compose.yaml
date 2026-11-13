@@ -1,5 +1,5 @@
 # ai-hub — LAN内ローカルLLM推論ハブ
-# 6コンテナ構成: ollama(GPU/非公開) + strata(GPU+RAM+SSD/大型MoE) + catalog(非公開)
+# 7コンテナ構成: ollama(GPU/非公開) + strata(GPU+RAM+SSD/大型MoE) + catalog(非公開) + strata-relay(非公開)
 #               + gateway(LiteLLM/LAN公開) + chat + openclaw
 # 設計詳細は ../ARCHITECTURE.md を参照。
 
@@ -101,7 +101,24 @@ services:
     command: ["python", "/app/server.py"]
     networks: [aihub]              # host ポート非公開
 
-  gateway:                         # container 4: LiteLLM Proxy(認証/ルーティング/ログ)
+  strata-relay:                    # container 4: Strata ネイティブ API の中継(host 非公開)
+    # gateway の /strata/* を受け、ハブの master key を検証してから Strata の鍵に付け替えて
+    # strata:8080 へ中継する(Anthropic Messages / Responses / props / status / metrics など)。
+    # Strata の鍵はハブの外へ出ない。外部へは gateway の pass-through 経由でのみ公開する。
+    image: python:3.12-slim
+    container_name: ai-hub-strata-relay
+    restart: unless-stopped
+    environment:
+      - STRATA_URL=http://strata:8080
+      - STRATA_API_KEY=${STRATA_API_KEY}
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}   # クライアントの鍵をこれで検証する
+      - PORT=8090
+    volumes:
+      - ./strata-relay:/app:ro
+    command: ["python", "-u", "/app/server.py"]
+    networks: [aihub]              # host ポート非公開
+
+  gateway:                         # container 5: LiteLLM Proxy(認証/ルーティング/ログ)
     image: ghcr.io/berriai/litellm:main-latest
     container_name: ai-hub-gateway
     restart: unless-stopped
@@ -122,7 +139,7 @@ services:
     command: ["--config", "/app/config.yaml", "--port", "4000"]
     networks: [aihub]
 
-  chat:                            # container 5: チャット動作確認アプリ(薄いプロキシ + 静的UI)
+  chat:                            # container 6: チャット動作確認アプリ(薄いプロキシ + 静的UI)
     image: python:3.12-slim
     container_name: ai-hub-chat
     restart: unless-stopped
@@ -139,7 +156,7 @@ services:
       - "20801:8000"               # チャットUI LAN公開(Notion 台帳: 20801)
     networks: [aihub]
 
-  openclaw:                        # container 6: OpenClaw(AIエージェント + Control UI)
+  openclaw:                        # container 7: OpenClaw(AIエージェント + Control UI)
     # 推論は gateway 経由で large を使う(GPU は使わない)。設定は ./openclaw/openclaw.json。
     # 設定形式の変更が多いプロジェクトなので、バージョンを固定して明示的に上げる。
     image: ghcr.io/openclaw/openclaw:2026.9.4

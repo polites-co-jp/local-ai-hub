@@ -2,7 +2,7 @@
 
 LAN内ローカルLLM推論ハブのコンテナ定義。設計は [../ARCHITECTURE.md](../ARCHITECTURE.md) を参照。
 
-- `docker-compose.yaml` … ollama(埋め込み/非公開) + strata(生成 `large`/`:20803`) + catalog + gateway(LiteLLM/LAN公開 `:20800`) + chat(`:20801`) + openclaw(`:20802`)
+- `docker-compose.yaml` … ollama(埋め込み/非公開) + strata(生成 `large`/`:20803`) + catalog + strata-relay(`/strata/*` の中継) + gateway(LiteLLM/LAN公開 `:20800`) + chat(`:20801`) + openclaw(`:20802`)
 - `litellm.config.yaml` … 論理モデル名 `large` / `embed` のルーティング(`quality` / `quality-next` / `fast` / `gemma` はコメントアウト中)
 - `.env` … `LITELLM_MASTER_KEY` / `OPENCLAW_GATEWAY_TOKEN` / `STRATA_API_KEY`(コミットしない / `.env.example` をコピーして作成)
 
@@ -41,6 +41,19 @@ docker logs -f ai-hub-strata        # 初回はダウンロード(約 85GB)と�
 - `STRATA_SET` の `STRATA_PLE_AUTO_RAM=0` は n-gram 表(26.8GB)を NVMe から読ませる設定。外すと表がページキャッシュに載り、WSL VM が上限まで膨らむ。
 - 停止には最大2分かかる(`stop_grace_period: 2m`)。`docker kill` で止めない。
 - 更新: `image` のタグを書き換えて `docker compose up -d strata`。コンテナ内で `strata update` は使わない。
+
+## Strata ネイティブ API の中継(strata-relay)
+
+`strata-relay/server.py` … gateway の `/strata/*`(pass-through)を受け、ハブの master key を検証してから Strata の鍵に付け替えて `strata:8080` へ中継する(Python 標準ライブラリのみ)。Anthropic Messages・OpenAI Responses・状態取得系を変換なしで出す。
+
+- 中継するパスは `ROUTES` の許可リストだけ。会話の保存・復元(`POST /slots`)など状態を書き換える API は出さない。
+- 思考の強さが指定されていなければ、API ごとの書き方で「思考なし」を補う(`reasoning_effort: none` / `thinking: disabled` / `reasoning.effort: none`)。
+- Strata の `GET /mcp` は `/strata/mcp-servers` で出す(LiteLLM が `/{name}/mcp` を横取りするため)。
+- 変更したら `docker restart ai-hub-strata-relay`。新しいパスを足したら gateway 経由で届くかを試す。
+
+```powershell
+curl http://localhost:20800/strata/status -H "Authorization: Bearer <LITELLM_MASTER_KEY>"
+```
 
 ## チャット動作確認アプリ
 

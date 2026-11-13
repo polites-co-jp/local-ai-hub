@@ -8,6 +8,8 @@ LiteLLM の /v1/models は設定ファイルに書かれた論理名を返すだ
   1. gateway /model/info  … 論理名 → 実体 のルーティング定義(litellm.config.yaml 由来)
   2. ollama /api/tags     … 実際に pull 済みの実体
   3. strata /v1/models    … Strata に読み込まれて応答できる実体(api_base が STRATA_URL のもの)
+  4. strata /props        … Strata の実際の設定(文脈長・画像入力・tool 対応・サンプリング既定値・
+                             同時処理数・エンジン版)。手書きの model_info より優先して載せる
 
 外部公開は gateway(:20800) の pass-through 経由。認証はゲートウェイ任せにせず
 本サービス自身でも master key を検証する(pass-through の auth は Enterprise 機能で
@@ -40,7 +42,7 @@ KIND_ENDPOINT = {
 # LiteLLM は既知モデルに対して model_info へ料金表や能力フラグを大量に自動補完する
 # (embed が ollama/bge-m3 として認識されるとこれが起きる)。素通しすると推測値混じりの
 # ノイズがカタログに載るため、こちらで定義したキーだけを通す。
-META_KEYS = ("purpose", "context_length", "dimensions", "thinking", "notes")
+META_KEYS = ("purpose", "context_length", "dimensions", "thinking", "options", "native_api", "notes")
 
 
 def _get_json(url, key=None):
@@ -67,22 +69,62 @@ def _is_strata(params):
     return bool(STRATA) and base.startswith(STRATA)
 
 
-def _strata_models():
-    """Strata が応答できるモデル ID の集合。落ちている・読み込み中なら空集合(= 未提供扱い)。"""
+def _strata_state():
+    """Strata の読み込み済みモデルと、実行中の設定から読める能力。
+
+    戻り値: (モデル ID → /v1/models の行, /props の dict)。落ちている・読み込み中なら ({}, {})
+    (= 未提供扱い)。/props が取れなくてもモデル一覧が取れれば提供中とみなす。
+    """
     if not STRATA:
-        return set()
+        return {}, {}
     try:
         data = _get_json(STRATA + "/v1/models", STRATA_KEY)
     except (urllib.error.URLError, OSError, ValueError):
-        return set()
-    return {m.get("id") for m in data.get("data", []) if m.get("id")}
+        return {}, {}
+    models = {m.get("id"): m for m in data.get("data", []) if m.get("id")}
+    try:
+        props = _get_json(STRATA + "/props", STRATA_KEY)
+    except (urllib.error.URLError, OSError, ValueError):
+        props = {}
+    return models, props
+
+
+def _strata_live(model_row, props):
+    """Strata が今の設定で実際に提供している能力。手書きの model_info より優先する。
+
+    Strata の起動設定(文脈長・画像入力・同時処理数)を変えると、ここが自動で追従する。
+    """
+    live = {}
+    gen = props.get("default_generation_settings") or {}
+    n_ctx = gen.get("n_ctx") or (model_row.get("meta") or {}).get("n_ctx")
+    if n_ctx:
+        live["context_length"] = n_ctx
+    arch = model_row.get("architecture") or {}
+    if arch.get("input_modalities"):
+        live["input_modalities"] = arch["input_modalities"]
+    caps = props.get("chat_template_caps") or {}
+    if caps:
+        live["capabilities"] = {
+            "tools": bool(caps.get("supports_tools")),
+            "parallel_tool_calls": bool(caps.get("supports_parallel_tool_calls")),
+            "system_role": bool(caps.get("supports_system_role")),
+            "vision": bool((props.get("modalities") or {}).get("vision")),
+        }
+    params = {k: v for k, v in (gen.get("params") or {}).items() if k != "n_predict"}
+    if params:
+        live["sampling_defaults"] = params  # リクエストで省略したときに Strata が使う値
+    if props.get("total_slots"):
+        live["parallel_requests"] = props["total_slots"]
+    if props.get("build_info"):
+        live["engine"] = props["build_info"]
+    return live
 
 
 def build_catalog(include_uninstalled=False):
     """ルーティング定義と、実際に提供できる実体を突合してカタログを組み立てる。"""
     info = _get_json(GATEWAY + "/model/info", KEY)
     tags = _get_json(OLLAMA + "/api/tags")
-    strata_ids = None  # Strata を参照する論理名があるときだけ問い合わせる
+    strata = None  # Strata を参照する論理名があるときだけ問い合わせる
 
     installed = {}
     for m in tags.get("models", []):
@@ -97,13 +139,17 @@ def build_catalog(include_uninstalled=False):
         raw_meta = row.get("model_info") or {}
         meta = {k: raw_meta[k] for k in META_KEYS if raw_meta.get(k) is not None}
 
+        live = {}
         if _is_strata(params):
-            if strata_ids is None:
-                strata_ids = _strata_models()
+            if strata is None:
+                strata = _strata_state()
+            models, props = strata
             model = params.get("model") or ""
             backend = model.split("/", 1)[1] if "/" in model else model
-            hit = {} if backend in strata_ids else None
+            hit = {} if backend in models else None
             missing = "backend model '%s' is not loaded on the strata runtime" % backend
+            if hit is not None:
+                live = _strata_live(models[backend], props)
         else:
             backend = _normalize_backend(params.get("model"))
             hit = installed.get(backend)
@@ -124,7 +170,8 @@ def build_catalog(include_uninstalled=False):
                 entry["backend_size_bytes"] = hit.get("size")
         else:
             entry["unavailable_reason"] = missing
-        entry.update(meta)  # purpose / context_length / thinking / dimensions など
+        entry.update(meta)  # purpose / context_length / thinking / dimensions / options など
+        entry.update(live)  # Strata の実際の設定(context_length などは手書きより優先)
         entries.append(entry)
 
     if not include_uninstalled:

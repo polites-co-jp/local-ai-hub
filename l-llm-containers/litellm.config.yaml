@@ -24,16 +24,45 @@ model_list:
       # drop_params: true でも reasoning_effort を落とさせない(openai/ の未知モデル扱いのため)。
       allowed_openai_params: ["reasoning_effort"]
       timeout: 900
+    # context_length / input_modalities / capabilities / sampling_defaults / parallel_requests / engine は
+    # カタログが Strata の /props と /v1/models から実際の値を読んで上書きする(ここの値は Strata 停止中の目安)。
     model_info:
       kind: chat
-      purpose: 生成全般(要約・抽出・分類・コード・tool call・エージェント実行)。ハブの既定モデル
+      purpose: 生成全般(要約・抽出・分類・コード・tool call・画像の読み取り・エージェント実行)。ハブの既定モデル
       context_length: 131072
       thinking:
         enabled_by_default: false
         note: 思考を有効にすると message.reasoning_content に入る。最終回答は message.content。
         enable: 'リクエストボディに "reasoning_effort": "low" / "medium" / "high"'
         disable: '既定で無効(ハブが "reasoning_effort": "none" を補う)'
-      notes: 生成 50〜78 tok/s、prefill 1200〜1600 tok/s(2026-11-13 実測)。同時に処理するのは1リクエストだけで、後続は待たされる。長文は読み込みに時間がかかる(1.5 万トークンで約 10 秒)
+        budget: '"reasoning_budget_tokens": N で思考を N トークン前後で打ち切って回答に移らせる'
+      # Strata が受け付けるリクエストオプション(/v1/chat/completions と /strata/v1/chat/completions の両方で効く)。
+      options:
+        reasoning_effort: '"none" | "low" | "medium" | "high"。ハブの既定は none'
+        reasoning: '{"effort": ...}(Responses 形式の書き方。reasoning_effort と同じ意味)'
+        chat_template_kwargs: '{"enable_thinking": false} で思考を止める(reasoning_effort: none と同じ)'
+        reasoning_budget_tokens: 思考の上限トークン数。超えると短い締めの一文で思考を終えて回答する
+        sampling: temperature / top_p / top_k(1〜64) / min_p / seed / repetition_penalty / presence_penalty / frequency_penalty。省略すると sampling_defaults の値。seed や temperature 0 でも出力は完全には固定されない
+        images: 'messages[].content に {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}} を入れる'
+        tools: tools / tool_choice / 並列 tool call。宣言していない tool 名の呼び出しはテキストのまま返り、応答の strata_rejected_tool_calls に名前が載る
+        response_extras: 応答の timings(prefill・生成の時間と速度)、strata_rejected_tool_calls
+      # Strata のネイティブ API。gateway の /strata/* から、ハブと同じ API キーで呼べる(strata-relay が中継)。
+      native_api:
+        base_path: /strata
+        auth: 'Authorization: Bearer <ハブの API キー>(Anthropic SDK の x-api-key でも可)'
+        endpoints:
+          chat_completions: POST /strata/v1/chat/completions(OpenAI Chat Completions。LiteLLM を通らない)
+          messages: POST /strata/v1/messages(Anthropic Messages。thinking / output_config.effort / budget_tokens)
+          count_tokens: POST /strata/v1/messages/count_tokens
+          responses: POST /strata/v1/responses(OpenAI Responses。ステートレス)
+          models: GET /strata/v1/models
+          props: GET /strata/props(文脈長・テンプレートの能力・サンプリング既定値・エンジン版)
+          status: GET /strata/status(処理中か・待ち行列の長さ・今の段階)
+          slots: GET /strata/slots
+          metrics: GET /strata/metrics(JSON。Accept text/plain か ?format=prometheus で Prometheus 形式)
+          mcp_servers: GET /strata/mcp-servers(Strata に登録した MCP サーバとツール。Strata 上の GET /mcp)
+        thinking_default: どの API でも、リクエストが思考の強さを指定しなければ「思考なし」を補う
+      notes: 生成 48〜79 tok/s、prefill 1200〜1700 tok/s(2026-11-13 実測)。同時に処理するのは1リクエストだけで、後続は待たされる。長文は読み込みに時間がかかる(1.5 万トークンで約 10 秒)
 
   # 埋め込み(多言語・常駐)
   - model_name: embed
@@ -116,6 +145,13 @@ general_settings:
       target: "http://catalog:8080/catalog"
       methods: ["GET"]
       forward_headers: true
+    # Strata のネイティブ API(Anthropic Messages / Responses / props / status / metrics など)。
+    # strata-relay がハブの master key を検証し、Strata の鍵に付け替えて中継する。
+    - path: "/strata"
+      target: "http://strata-relay:8090/strata"
+      methods: ["GET", "POST"]
+      forward_headers: true
+      include_subpath: true
 
 litellm_settings:
   drop_params: true              # OpenAI 互換外パラメータを無視(クライアント差異を吸収)

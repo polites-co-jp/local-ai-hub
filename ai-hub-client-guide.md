@@ -37,6 +37,10 @@ AI_HUB_KEY=sk-xxxx        # ハードコード禁止。.env は .gitignore に�
 | GET | `/v1/models` | OpenAI 標準の一覧。**未取得モデルも含まれ、呼ぶと 500 になりうる。使わない** | 必要 |
 | POST | `/v1/chat/completions` | 生成(`stream: true` で SSE 対応) | 必要 |
 | POST | `/v1/embeddings` | 埋め込みベクトル | 必要 |
+| POST | `/strata/v1/messages` | **Anthropic Messages 形式**の生成(Strata ネイティブ。`x-api-key` でも可) | 必要 |
+| POST | `/strata/v1/responses` | **OpenAI Responses 形式**の生成(Strata ネイティブ・ステートレス) | 必要 |
+| POST | `/strata/v1/chat/completions` | Chat Completions を Strata に直接(LiteLLM の変換を通さない) | 必要 |
+| GET | `/strata/status` / `/strata/props` / `/strata/metrics` | 生成モデルの混み具合・設定・監視値 | 必要 |
 
 ## 4. モデルの選び方 — まず `/v1/catalog` を叩く
 
@@ -53,6 +57,10 @@ curl $AI_HUB_URL/v1/catalog -H "Authorization: Bearer $AI_HUB_KEY"
 | `context_length` | 入力 + 思考 + 出力の合計上限(トークン) |
 | `thinking` | 思考モデルか・**思考の止め方**・注意点。**モデルごとに止め方が違うので必ず読む** |
 | `dimensions` | 埋め込みの次元数(索引設計に使う) |
+| `options` | そのモデルで使えるリクエストオプション(思考の上限・サンプリング・画像など)。§5-5 |
+| `input_modalities` / `capabilities` | 受け付ける入力(`image` があれば画像可)と tool 対応。生成エンジンの実際の設定から自動で載る |
+| `sampling_defaults` / `parallel_requests` | サンプリング省略時の値 / 同時に処理できるリクエスト数 |
+| `native_api` | Strata ネイティブ API(`/strata/*`)の一覧。§5-6 |
 | `backend` | 実体名。参考情報。**依存しないこと**(ハブ側で差し替わる) |
 
 現在の論理モデル(増減するので、起動時にカタログで確認しハードコードしない):
@@ -120,6 +128,57 @@ vectors = [d.embedding for d in resp.data]   # 各要素は長さ 1024 の float
 ```
 
 次元は **1024 固定**。索引(pgvector / FAISS 等)もこの次元で設計する。類似度はコサイン類似度を推奨。
+
+### 5-5. `large` のオプション(Strata)
+
+`/v1/chat/completions` のボディにそのまま書けば効く。カタログの `options` にも同じ一覧がある。
+
+```python
+resp = client.chat.completions.create(
+    model="large",
+    messages=[{"role": "user", "content": [
+        {"type": "text", "text": "この画像の要点を3行で"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,...."}},   # 画像入力
+    ]}],
+    reasoning_effort="medium",                    # none / low / medium / high(既定 none)
+    max_tokens=4096,
+    extra_body={
+        "reasoning_budget_tokens": 512,           # 思考を 512 トークン前後で打ち切って回答へ
+        "top_k": 20, "min_p": 0.05,               # OpenAI 標準外のサンプリング
+    },
+)
+print(resp.choices[0].message.content)
+```
+
+| オプション | 内容 |
+|---|---|
+| `reasoning_effort` / `reasoning: {"effort"}` / `chat_template_kwargs: {"enable_thinking": false}` | 思考の強さ・停止 |
+| `reasoning_budget_tokens` | 思考の上限トークン数 |
+| `temperature` / `top_p` / `top_k`(1〜64) / `min_p` / `seed` / `repetition_penalty` / `presence_penalty` / `frequency_penalty` | サンプリング。`seed` でも出力は完全には固定されない |
+| `image_url`(data URI) | 画像入力 |
+| `tools` / `tool_choice` | tool call(並列可)。宣言していない tool の呼び出しはテキストのまま返り、`strata_rejected_tool_calls` に名前が載る |
+
+応答には OpenAI 標準外の `timings`(読み込み・生成の時間と速度)が付く。
+
+### 5-6. Anthropic / Responses 形式で使う(`/strata/*`)
+
+生成モデルのネイティブ API を、同じ API キーで変換なしに使える。思考の強さを指定しなければ「思考なし」になる。
+
+```python
+import anthropic
+client = anthropic.Anthropic(base_url=os.environ["AI_HUB_URL"] + "/strata",
+                             api_key=os.environ["AI_HUB_KEY"])
+r = client.messages.create(
+    model="large", max_tokens=4096,
+    thinking={"type": "enabled", "budget_tokens": 1024},   # 省略すると思考なし
+    messages=[{"role": "user", "content": "……の原因を推理して"}],
+)
+print([b.type for b in r.content])   # ['thinking', 'text']
+```
+
+- OpenAI Responses: `POST $AI_HUB_URL/strata/v1/responses`(`{"model": "large", "input": "..."}`)。ステートレスなので `previous_response_id` での継続はできない。
+- 混み具合: `GET $AI_HUB_URL/strata/status` → `{"busy": ..., "queued": ...}`。重い処理を投げる前の確認に使える。
+- 使えるパスの一覧はカタログの `native_api.endpoints`。それ以外のパスは 404。
 
 ## 6. 必ず守る挙動・制約
 

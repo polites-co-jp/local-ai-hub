@@ -11,7 +11,7 @@
 - 公開範囲は**プライベートLAN内のみ**。インターネット非公開。アクセス制御はAPIキー(LiteLLM master key)。
 - アプリ固有ロジック(取り込み・推薦等)はクライアント側の責務。ハブは「推論を返す」だけ。
 
-## 構成（6コンテナ）
+## 構成（7コンテナ）
 
 すべて [l-llm-containers/docker-compose.yaml](l-llm-containers/docker-compose.yaml) で定義。
 
@@ -19,7 +19,8 @@
 |---|---|---|---|
 | `ai-hub-ollama` | 埋め込みランタイム。bge-m3 だけを常駐 | `11434`(内部のみ) | 非公開 |
 | `ai-hub-strata` | 生成ランタイム [Strata](https://github.com/Niko1221/Strata)。Qwen3.8-Flash-Next IQ3_S(125B MoE / アクティブ 6B)を論理名 `large` で提供。Web UI あり | host `20803`→`8080` | LAN公開(API キー必須) |
-| `ai-hub-catalog` | モデルカタログAPI。実際に呼べるモデルだけを返す(Python標準ライブラリのみ) | `8080`(内部のみ) | 非公開(gateway経由) |
+| `ai-hub-catalog` | モデルカタログAPI。実際に呼べるモデルだけを返す。Strata の `/props` から実際の能力も載せる(Python標準ライブラリのみ) | `8080`(内部のみ) | 非公開(gateway経由) |
+| `ai-hub-strata-relay` | Strata ネイティブ API の中継(`/strata/*`)。ハブの master key を検証し Strata の鍵に付け替える(Python標準ライブラリのみ) | `8090`(内部のみ) | 非公開(gateway の pass-through 経由) |
 | `ai-hub-gateway` | LiteLLM Proxy。推論APIの窓口。認証/論理名ルーティング/ログ | host `20800`→`4000` | LAN公開 |
 | `ai-hub-chat` | 動作確認用の薄いチャットUI(Python標準ライブラリのみ)。既定モデルは `large` | host `20801`→`8000` | LAN公開 |
 | `ai-hub-openclaw` | OpenClaw(AIエージェント)と管理画面 Control UI。推論は gateway 経由で `large` を使うクライアント | host `20802`→`18789` | LAN公開(トークン+ペアリング) |
@@ -37,12 +38,13 @@ local-ai-hub/
 ├── ai-hub-client-guide.md     # 外部クライアント実装者向けの連携手順書(サンプル/エラー早見表)
 ├── docs/port-registry.md      # ポート台帳の写し(正本は Notion)
 └── l-llm-containers/          # コンテナ定義一式
-    ├── docker-compose.yaml    # 6コンテナ定義 + ollama / strata の環境変数
+    ├── docker-compose.yaml    # 7コンテナ定義 + ollama / strata の環境変数
     ├── litellm.config.yaml    # 論理モデル名 → 実体(strata / ollama)のルーティング + model_info(カタログの情報源)
     ├── .env                   # LITELLM_MASTER_KEY / OPENCLAW_GATEWAY_TOKEN / STRATA_API_KEY(コミット禁止 / .gitignore済み)
     ├── .env.example           # .envのテンプレート
     ├── README.md              # セットアップ/運用手順
-    ├── catalog/               # カタログAPI(server.py = 実行可能モデルの突合)
+    ├── catalog/               # カタログAPI(server.py = 実行可能モデルの突合 + Strata の実際の能力)
+    ├── strata-relay/          # Strata ネイティブ API の中継(server.py。/strata/* → strata:8080)
     ├── chat/                  # 動作確認UI(server.py = 薄いプロキシ, index.html)
     └── openclaw/              # OpenClaw 設定(openclaw.json = JSON5。状態はボリューム openclaw_state)
 ```
@@ -87,8 +89,11 @@ curl http://localhost:20800/health/liveliness   # ゲートウェイ疎通(キ�
 - **ollama のコンテキスト長設定**(`OLLAMA_CONTEXT_LENGTH=32768`、`OLLAMA_KV_CACHE_TYPE=q8_0`、`OLLAMA_FLASH_ATTENTION=1`)は、非公開の生成モデルを戻すとき用に残してある。
 - **master key は [.env](l-llm-containers/.env) のみ**(コミット禁止)。値は `Select-String -Path l-llm-containers/.env -Pattern 'LITELLM_MASTER_KEY=(.+)'` で取得可。Strata の鍵は同じファイルの `STRATA_API_KEY`。
 - **論理モデルの追加/差し替えは [litellm.config.yaml](l-llm-containers/litellm.config.yaml)** で行う。クライアントは論理名のみ参照するため実体差し替えの影響を受けない。追加時は `model_info`(用途・thinking の扱い・次元など)も書く。**カタログAPIが返すクライアント向け説明はここが単一の情報源**。
-- **`/v1/models` は嘘をつく**。設定に書いた論理名を返すだけで実体の状態を見ないため、未 pull・未起動のモデルも一覧に出て呼ぶと失敗する。**実際に呼べるモデルは `/v1/catalog`**(catalog コンテナが ollama の `/api/tags` と strata の `/v1/models` を突合)。未 pull の論理名は設定でコメントアウトしておく。
-- **設定ファイルはバインドマウントなので `docker compose up -d` では再読み込みされない**。`litellm.config.yaml` を変えたら `docker restart ai-hub-gateway`、`catalog/server.py` を変えたら `docker restart ai-hub-catalog`、`openclaw/openclaw.json` を変えたら `docker restart ai-hub-openclaw`。
+- **`/v1/models` は嘘をつく**。設定に書いた論理名を返すだけで実体の状態を見ないため、未 pull・未起動のモデルも一覧に出て呼ぶと失敗する。**実際に呼べるモデルは `/v1/catalog`**(catalog コンテナが ollama の `/api/tags` と strata の `/v1/models` を突合し、Strata の `/props` から文脈長・画像入力・tool 対応・サンプリング既定値を載せる)。未 pull の論理名は設定でコメントアウトしておく。
+- **Strata のネイティブ API は gateway の `/strata/*`**(litellm.config.yaml の pass-through → strata-relay → strata:8080)。中継するパスは [strata-relay/server.py](l-llm-containers/strata-relay/server.py) の `ROUTES` の許可リストだけ。状態を書き換える API(`POST /slots` など)は出さない。Strata の機能を新しく出すときはここに足し、`docker restart ai-hub-strata-relay`。
+- **LiteLLM は `/{name}/mcp` を自分の MCP ルートとして横取りする**。そのため Strata の `GET /mcp` は `/strata/mcp-servers` という別名で出している(relay の `UPSTREAM_PATH`)。`/strata/...` に新しいパスを足したら、gateway 経由で本当に relay まで届くかを必ず試す。
+- **Strata 固有のオプションは `/v1/chat/completions` でも素通しされる**(`reasoning_budget_tokens`、`top_k`、`chat_template_kwargs`、画像など。2026-11-13 実測)。ただし `/v1/messages` と `/v1/responses` は LiteLLM が変換するので、Strata の扱いを確実に効かせるなら `/strata/*` を使う。
+- **設定ファイルはバインドマウントなので `docker compose up -d` では再読み込みされない**。`litellm.config.yaml` を変えたら `docker restart ai-hub-gateway`、`catalog/server.py` を変えたら `docker restart ai-hub-catalog`、`strata-relay/server.py` を変えたら `docker restart ai-hub-strata-relay`、`openclaw/openclaw.json` を変えたら `docker restart ai-hub-openclaw`。
 - **OpenClaw の Control UI(`:20802`)は初回にトークンとブラウザごとのペアリング承認が要る**。トークンは [.env](l-llm-containers/.env) の `OPENCLAW_GATEWAY_TOKEN`。loopback からの接続は自動承認されるが、Docker のポート転送を経由すると localhost から開いても loopback と見なされず、承認待ちになることがある。`docker exec ai-hub-openclaw node dist/index.js devices list` で requestId を見て `devices approve <requestId>` で承認する。
 - **OpenClaw の設定は [openclaw/openclaw.json](l-llm-containers/openclaw/openclaw.json)**(バインドマウント)。Control UI から設定を変えるとこのファイルが書き換わる。秘密は `${ENV}` 参照にして直接書かない。思考の既定は `off`(`reasoning_effort: "none"` に変換される)。OpenClaw のエージェントはコンテナ内でシェルを実行でき、環境変数の `LITELLM_MASTER_KEY` も読める。
 - **litellm.config.yaml の YAML に注意**。値に `": "` を含む文字列(例: `"reasoning_effort": "low"` という説明文)はクォートしないと `ScannerError` で gateway が起動しなくなる。
