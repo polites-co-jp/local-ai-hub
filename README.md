@@ -74,6 +74,7 @@ Anthropic 形式(`/strata/v1/messages`)や OpenAI Responses(`/strata/v1/response
 | ドキュメント | 内容 |
 |---|---|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | 設計 & 連携手順書(構成 / VRAM配分 / カタログAPI / 接続手順) |
+| [docs/ai-hub-api-reference.md](docs/ai-hub-api-reference.md) | **外部アプリに渡す API リファレンス**(全エンドポイント・オプション・実機の応答例・エラー) |
 | [ai-hub-client-guide.md](ai-hub-client-guide.md) | 外部クライアント実装者向けの連携手順書(サンプルコード / エラー早見表) |
 | [l-llm-containers/README.md](l-llm-containers/README.md) | コンテナのセットアップ / 運用手順 |
 | [CLAUDE.md](CLAUDE.md) | Claude Code 向けガイド(運用上のハマりどころ含む) |
