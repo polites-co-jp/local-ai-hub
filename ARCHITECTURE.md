@@ -34,7 +34,7 @@
 | レイヤー | 採用 | 備考 |
 |---|---|---|
 | 実行マシン | Windows 11 + Ryzen 9 7950X + RAM 128GB + NVIDIA RTX 5060 Ti 16GB (Blackwell) | GPU 帯域 448GB/s |
-| コンテナ基盤 | Docker Desktop(WSL2)+ NVIDIA Container Toolkit | GPUパススルー。`~/.wslconfig` は `memory=104GB` |
+| コンテナ基盤 | Docker Desktop(WSL2)+ NVIDIA Container Toolkit | GPUパススルー。`~/.wslconfig` は `memory=72GB` |
 | 推論ランタイム(生成) | **Strata**(GPU・RAM・SSD の3層に MoE の専門家を置く推論エンジン) | §4 |
 | 推論ランタイム(埋め込み) | **ollama**(OpenAI互換API, 動的モデル管理) | bge-m3 だけを常駐 |
 | ゲートウェイ | **LiteLLM Proxy**(認証/ルーティング/ログ) | 推論APIの窓口。自作しない |
@@ -129,13 +129,17 @@ Qwen3.8-Flash-Next は総パラメータ 125B だが、1トークンで動くの
 | 生成速度 | コード 73.0 / 論理 75.3 / 英文 54.2 / 日本語 48.8 tok/s |
 | prefill | 4k トークンで約 1200 tok/s(3.4 秒)、1.5 万トークンで約 1700 tok/s(9.1 秒) |
 | VRAM(合計、デスクトップ込み) | 14.1〜14.9 GB / 16.3 GB。Strata の専門家キャッシュ 5.14GiB、bge-m3 0.7GB |
-| RAM | Strata 約 55GB(WSL VM 104GB 中) |
+| RAM | Strata 約 52GB(専門家の重み。WSL VM 72GB 中。残りはページキャッシュと他コンテナ) |
 | 同時処理 | 1リクエスト(推測デコードの DFlash2 が1件ずつしか扱わないため) |
 
 参考(Phase 1 の比較):Strata 単独で予備枠なしのときは専門家キャッシュ 6.99GiB・生成 50.6〜77.8 tok/s。ollama に quality-next(64k)と bge-m3 を常駐させたままだと、キャッシュは 3.74GiB に縮み、生成は 48.9〜75.0 tok/s。
 
 - **VRAM の予備枠**:`STRATA_SET=vram-reserve-mib=1792`。Strata は既定で空いている VRAM を専門家キャッシュで使い切る。そのため bge-m3 が後から載る余地がなくなり、さらに長文で KV が伸びると GPU メモリが RAM に追い出されて数 tok/s に落ちる(エンジンログに警告が出る)。予備枠を取ると、すべて読み込んだあとの空きは約 1.1GB になる。
 - **RAM**:Strata はコンテナにメモリ上限を付けない前提で、WSL VM 全体の RAM から配置を決める。`~/.wslconfig` の `memory=16GB`(旧設定)では起動しない。
+  - 専門家の重み(約 51GB)は RAM に page-lock で常駐する。IQ3_S を使う限り、これより減らせない。
+  - n-gram 埋め込みの表(26.8GB)は `STRATA_SET` の `STRATA_PLE_AUTO_RAM=0` で NVMe から直接読ませている。既定では RAM に余裕があると表をファイルキャッシュに載せるため、WSL VM が 98GB まで膨らみ、Windows の空きが 3GB まで減った(2026-11-13)。
+  - WSL VM の上限は `memory=72GB`(104GB から下げた)。内訳は Strata 約 52GB、他コンテナ約 5GB、残りがページキャッシュ。Windows の空きは約 33GB。
+  - 上限を下げた前後で速度はほぼ同じ(生成 48.5〜79.0 tok/s、prefill 1207〜1689 tok/s)。
 - **ストレージ**:重みは NVMe 必須(SATA HDD では起動に数分かかり、専門家の読み込みも遅い)。E: は HDD なので、プロジェクト内へのバインドマウントではなく名前付きボリューム(Docker のデータ領域 = D: の NVMe)に置く。
 - **ollama のコンテキスト長設定**(`OLLAMA_CONTEXT_LENGTH=32768`、KV q8_0、flash attention)は残してある。非公開にした生成モデルを戻すとき用で、今は bge-m3 にしか効かない。
 - **⚠️ Whisper などの GPU モデルを本ハブに追加しない**。VRAM の空きは約 1.1GB しかない。
@@ -373,7 +377,7 @@ docker compose up -d                       # 全コンテナ起動
 ```
 
 - **前提(Strata)**
-  - `~/.wslconfig` の `[wsl2]` に `memory=104GB` / `swap=8GB`。変えたら `wsl --shutdown` して Docker Desktop を起動し直す(他プロジェクトのコンテナも止まる。`restart: no` のものは手で起こす)。
+  - `~/.wslconfig` の `[wsl2]` に `memory=72GB` / `swap=8GB`。変えたら `wsl --shutdown` して Docker Desktop を起動し直す(他プロジェクトのコンテナも止まる。`restart: no` のものは手で起こす)。止める前に `docker stop $(docker ps -q)` でコンテナを正常停止させる(強制終了すると postgres が起動時に復旧処理を走らせる)。再起動後にハブのポート(20800〜20803)がホストから応答しないときは `docker compose up -d --force-recreate --no-deps gateway chat openclaw strata` で作り直す(2026-11-13 に発生)。
   - `.env` に `STRATA_API_KEY`(16 文字以上)。
   - NVIDIA ドライバ 580 以上(cuda13 イメージの要件)。
   - 初回起動はモデルのダウンロード(約 85GB)と検査で数十分かかる。`docker logs -f ai-hub-strata` で進み具合が見える。2回目以降の起動は約1分。

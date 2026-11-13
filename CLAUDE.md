@@ -71,7 +71,10 @@ curl http://localhost:20800/health/liveliness   # ゲートウェイ疎通(キ�
 
 ## 運用上の重要事項（ハマりどころ）
 
-- **Strata は WSL のメモリを 104GB に上げてある前提**。`~/.wslconfig` の `[wsl2]` が `memory=104GB` / `swap=8GB`(2026-11-13 に 16GB/4GB から変更。バックアップ `~/.wslconfig.bak-20261113`)。Strata は約 55GB の RAM を使い、コンテナにメモリ上限を付けてはいけない。`wsl --shutdown` は他プロジェクトのコンテナも止める。`restart: no` のもの(chiten の大半)は手で `docker start` する。そのとき chiten-api は postgres より先に起きるとマイグレーションに失敗するので、postgres が healthy になってから起こす。
+- **Strata は WSL のメモリを 72GB に上げてある前提**。`~/.wslconfig` の `[wsl2]` が `memory=72GB` / `swap=8GB`(2026-11-13 に 16GB/4GB → 104GB → 72GB と変更。最初のバックアップ `~/.wslconfig.bak-20261113`)。Strata は専門家の重みで約 52GB の RAM を使い、コンテナにメモリ上限を付けてはいけない。
+- **n-gram 表は NVMe から読ませる**(`STRATA_SET` の `STRATA_PLE_AUTO_RAM=0`)。外すと表(26.8GB)がページキャッシュに載り、WSL VM が上限まで膨らむ(104GB 時代に Windows の空きが 3GB まで減った)。速度の差は数%。
+- **`wsl --shutdown` の前に `docker stop $(docker ps -q)` でコンテナを正常停止させる**。Docker Desktop を強制終了してから止めると、postgres が次の起動で復旧処理(fsync)に1分以上かかる。`wsl --shutdown` は他プロジェクトのコンテナも止める。`restart: no` のもの(chiten の大半)は手で `docker start` する。そのとき chiten-api は postgres より先に起きるとマイグレーションに失敗するので、postgres が healthy になってから起こす。
+- **WSL 再起動後にハブのポート(20800〜20803)がホストから応答しないことがある**(コンテナ間の通信は正常、他プロジェクトのポートも正常)。`docker compose up -d --force-recreate --no-deps gateway chat openclaw strata` で作り直すと直る(2026-11-13 に発生)。
 - **Strata の重みは名前付きボリューム `ai-hub-strata-data`(約 87GB)**。Docker のデータ領域(D: の NVMe)に置く。E: は HDD で Strata の SSD ストリーミングに使えないため、プロジェクト内バインドマウントのルールの例外にしている。`docker compose down -v` は使わない(再ダウンロードに数十分かかる)。
 - **Strata は空いている VRAM を専門家キャッシュで使い切る**。`STRATA_SET=vram-reserve-mib=1792` で bge-m3 と KV の伸びのぶんを残している。外すと長文で GPU メモリが RAM に追い出され、数 tok/s に落ちる(エンジンログ `/data/state/strata/launch/docker.engine.log` に `only N MiB of VRAM free` の警告が出る)。
 - **VRAM予算(16GB / 16311 MiB)**: 実測(nvidia-smi, デスクトップアプリ込みの総使用量)は以下。

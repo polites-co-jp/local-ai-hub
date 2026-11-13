@@ -32,7 +32,7 @@ LAN内の汎用ローカルLLM推論ハブ。GPU搭載マシン上で、**OpenAI
 ## クイックスタート
 
 ```powershell
-# 前提: ~/.wslconfig の [wsl2] に memory=104GB を設定し、wsl --shutdown 済み
+# 前提: ~/.wslconfig の [wsl2] に memory=72GB を設定し、wsl --shutdown 済み
 cd l-llm-containers
 Copy-Item .env.example .env    # LITELLM_MASTER_KEY / OPENCLAW_GATEWAY_TOKEN / STRATA_API_KEY を設定
 docker compose up -d           # 初回は Strata がモデル(約 85GB)をダウンロードする

@@ -40,8 +40,8 @@ services:
 
   strata:                          # container 2: Strata(大型 MoE 推論エンジン。論理名 large)
     # Qwen3.8-Flash-Next(125B / アクティブ 6B)を GPU・RAM・SSD の3層に分けて置く。
-    # 実測(2026-11-13, IQ3_S, 128k): 生成 50〜78 tok/s、prefill 1200〜1600 tok/s、RAM 約 55GB。
-    # 前提: ~/.wslconfig の memory を 104GB に上げてあること(既定 16GB では起動しない)。
+    # 実測(2026-11-13, IQ3_S, 128k): 生成 48〜79 tok/s、prefill 1200〜1700 tok/s、RAM 約 52GB。
+    # 前提: ~/.wslconfig の memory を 72GB に上げてあること(既定 16GB では起動しない)。
     # バージョンは固定し、上げるときは docs の手順(docs/DOCKER.md#updating)に従う。
     image: ghcr.io/niko1221/strata:0.2.13-cuda13
     container_name: ai-hub-strata
@@ -56,7 +56,9 @@ services:
       - API_KEY=${STRATA_API_KEY}  # gateway と Web UI(:20803)からの呼び出しに必須(.env)
       # bge-m3(約 0.7GB)が後から GPU に載れるよう VRAM を残す。残さないと Strata が
       # 空きを専門家キャッシュで使い切り、GPU メモリが RAM に追い出されて数 tok/s に落ちる。
-      - STRATA_SET=vram-reserve-mib=1792
+      # STRATA_PLE_AUTO_RAM=0: n-gram 埋め込みの表(26.8GB)を RAM に載せず NVMe から読む。
+      # 既定では RAM に余裕があると表をページキャッシュに載せ、WSL VM が上限まで膨らむ。速度の差は数%。
+      - STRATA_SET=vram-reserve-mib=1792 STRATA_PLE_AUTO_RAM=0
     volumes:
       # モデル(約 87GB)は名前付きボリューム = Docker のデータ領域(D: の NVMe)に置く。
       # E: は HDD で SSD ストリーミングに使えないため、プロジェクト内バインドマウントの例外。

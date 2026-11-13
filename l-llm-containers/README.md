@@ -24,7 +24,7 @@ LAN内ローカルLLM推論ハブのコンテナ定義。設計は [../ARCHITECT
 
 **前提**
 
-- `~/.wslconfig` の `[wsl2]` に `memory=104GB` / `swap=8GB`(旧設定 16GB では起動しない)。変えたら `wsl --shutdown` → Docker Desktop を起動し直す。
+- `~/.wslconfig` の `[wsl2]` に `memory=72GB` / `swap=8GB`(旧設定 16GB では起動しない)。変えるときは `docker stop $(docker ps -q)` → `wsl --shutdown` → Docker Desktop を起動し直す。再起動後にハブのポートがホストから応答しなければ `docker compose up -d --force-recreate --no-deps gateway chat openclaw strata`。
 - NVIDIA ドライバ 580 以上(`0.2.13-cuda13` イメージの要件)。
 - `.env` に `STRATA_API_KEY`(16 文字以上)。
 
@@ -37,7 +37,8 @@ docker logs -f ai-hub-strata        # 初回はダウンロード(約 85GB)と�
 - Web UI: ブラウザで `http://192.168.1.111:20803` を開く(API キーは `STRATA_API_KEY`)。
 - ライブモニタ: `docker exec -it ai-hub-strata strata monitor`(`q` で抜ける)。
 - 設定は環境変数(`MODEL` / `CONTEXT` / `STRATA_SET` 等)。変えたら `docker compose up -d strata` で作り直す。モデルはボリュームに残るので再ダウンロードは起きない。
-- `STRATA_SET=vram-reserve-mib=1792` は bge-m3 と KV の伸びのぶん VRAM を残す設定。外すと Strata が VRAM を使い切り、長文で数 tok/s に落ちることがある。
+- `STRATA_SET` の `vram-reserve-mib=1792` は bge-m3 と KV の伸びのぶん VRAM を残す設定。外すと Strata が VRAM を使い切り、長文で数 tok/s に落ちることがある。
+- `STRATA_SET` の `STRATA_PLE_AUTO_RAM=0` は n-gram 表(26.8GB)を NVMe から読ませる設定。外すと表がページキャッシュに載り、WSL VM が上限まで膨らむ。
 - 停止には最大2分かかる(`stop_grace_period: 2m`)。`docker kill` で止めない。
 - 更新: `image` のタグを書き換えて `docker compose up -d strata`。コンテナ内で `strata update` は使わない。
 
