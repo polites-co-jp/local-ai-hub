@@ -1,53 +1,39 @@
-# LiteLLM Proxy 設定 — 論理モデル名 → ollama 実体のルーティング。
-# クライアントは論理名(quality / quality-next / embed)のみ参照。実体は後から差し替え可。
+# LiteLLM Proxy 設定 — 論理モデル名 → 実体(strata / ollama)のルーティング。
+# クライアントは論理名(large / embed)のみ参照。実体は後から差し替え可。
 #
 # model_info はカタログAPI(/v1/catalog)がそのまま返すメタデータ。モデルを追加・差し替えたら
 # ここも更新すること(クライアント向けの説明の単一の情報源)。
 #
-# 重要: ここに書いただけではモデルは使えない。実体を必ず pull すること。
+# 重要: ここに書いただけではモデルは使えない。ollama の実体は必ず pull すること。
 #   docker exec ai-hub-ollama ollama pull <実体名>
 # 未 pull のまま列挙すると /v1/models には出るのに呼ぶと 500 になる。
-# 未 pull の論理名は下の fast / gemma のようにコメントアウトしておく。
+# 未 pull・非公開の論理名は下の quality / fast / gemma のようにコメントアウトしておく。
 
 model_list:
-  # 生成(品質優先・常駐)。実体は Q4_K_M(ollama 既定)。
-  # 品質を上げる場合は HuggingFace GGUF 経由の Q5_K_M 等へ差し替え:
-  #   model: ollama_chat/hf.co/unsloth/Qwen3-14B-GGUF:Q5_K_M
-  - model_name: quality
+  # 生成(ハブの既定・常駐)。Strata 推論エンジン上の Qwen3.8-Flash-Next IQ3_S
+  # (125B MoE / アクティブ 6B)。GPU・RAM・SSD の3層に専門家を置くため 16GB GPU でも動く。
+  # チャットUI と OpenClaw の既定モデル。
+  - model_name: large
     litellm_params:
-      model: ollama_chat/qwen3:14b
-      api_base: http://ollama:11434
+      model: openai/qwen3.8-flash-next-iq3_s
+      api_base: http://strata:8080/v1
+      api_key: os.environ/STRATA_API_KEY
+      # Strata 自体の既定は high(長く考える)。ハブの既定は思考なしにし、必要なクライアントが
+      # リクエストで low / medium / high を指定する(リクエスト側の指定が優先される)。
+      reasoning_effort: none
+      # drop_params: true でも reasoning_effort を落とさせない(openai/ の未知モデル扱いのため)。
+      allowed_openai_params: ["reasoning_effort"]
+      timeout: 900
     model_info:
       kind: chat
-      purpose: 要約・分類・タグ付け・生成全般(高品質)
-      context_length: 32768
+      purpose: 生成全般(要約・抽出・分類・コード・tool call・エージェント実行)。ハブの既定モデル
+      context_length: 131072
       thinking:
-        enabled_by_default: true
-        note: 思考は message.reasoning_content に入る。最終回答は message.content。
-        disable: ユーザメッセージ末尾に /no_think を付ける
-        caution: max_tokens が小さいと思考の途中で打ち切られ content が空になる(目安 1024 以上)
-      notes: VRAM をほぼ使い切るため、GPU が他アプリに使われていると 500(out of memory)になることがある
-
-  # 生成(次世代候補・オンデマンド)。Qwen3.5 9B dense = 日本語スコアで旧 14B 超え、
-  # サイズは 6.6GB と約半分。要約/テーマ抽出の評価用に quality と並走させる。
-  # 比較で問題なければ quality の実体をこれに差し替える(クライアントは無変更)。
-  # チャットUI と OpenClaw の既定モデル。OpenClaw はローカルモデルに 64k 以上を推奨するため、
-  # このモデルだけ num_ctx=65536 で OLLAMA_CONTEXT_LENGTH(32k)を上書きする。
-  - model_name: quality-next
-    litellm_params:
-      model: ollama_chat/qwen3.5:9b
-      api_base: http://ollama:11434
-      num_ctx: 65536
-    model_info:
-      kind: chat
-      purpose: 日本語の要約・テーマ抽出、OpenClaw のエージェント実行(ハブの既定モデル)
-      context_length: 65536
-      thinking:
-        enabled_by_default: true
-        note: 思考は message.reasoning_content に入る。最終回答は message.content。
-        disable: 'リクエストボディに "think": false (または "reasoning_effort": "none")'
-        caution: /no_think は効かない。抑制しないと簡単な質問でも 1 万トークン超を思考に費やす
-      notes: VRAM 使用は約 6.3GB。embed と同時常駐しても 5GB 程度の余裕がある
+        enabled_by_default: false
+        note: 思考を有効にすると message.reasoning_content に入る。最終回答は message.content。
+        enable: 'リクエストボディに "reasoning_effort": "low" / "medium" / "high"'
+        disable: '既定で無効(ハブが "reasoning_effort": "none" を補う)'
+      notes: 生成 50〜78 tok/s、prefill 1200〜1600 tok/s(2026-11-13 実測)。同時に処理するのは1リクエストだけで、後続は待たされる。長文は読み込みに時間がかかる(1.5 万トークンで約 10 秒)
 
   # 埋め込み(多言語・常駐)
   - model_name: embed
@@ -60,8 +46,44 @@ model_list:
       dimensions: 1024
       notes: 多言語(日本語良好)。索引は次元 1024 で設計すること
 
-  # --- 以下は実体が未 pull のため無効化中 ---
-  # 有効化するには pull してからコメントを外し、gateway を再起動する。
+  # --- 以下は無効化中 ---
+  # quality / quality-next は 2026-11-13 に large(Strata)へ置き換えて非公開にした。重みは
+  # ollama に残してある。large と同時に GPU に載せると VRAM が足りず、遅くなるか OOM で 500 になる。
+  # 戻すときは large を止める(docker stop ai-hub-strata)か、VRAM の予算を測り直してから
+  # コメントを外し、gateway を再起動する。
+  #
+  # - model_name: quality
+  #   litellm_params:
+  #     model: ollama_chat/qwen3:14b
+  #     api_base: http://ollama:11434
+  #   model_info:
+  #     kind: chat
+  #     purpose: 要約・分類・タグ付け・生成全般(高品質)
+  #     context_length: 32768
+  #     thinking:
+  #       enabled_by_default: true
+  #       note: 思考は message.reasoning_content に入る。最終回答は message.content。
+  #       disable: ユーザメッセージ末尾に /no_think を付ける
+  #       caution: max_tokens が小さいと思考の途中で打ち切られ content が空になる(目安 1024 以上)
+  #     notes: VRAM 約 11GB
+  #
+  # - model_name: quality-next
+  #   litellm_params:
+  #     model: ollama_chat/qwen3.5:9b
+  #     api_base: http://ollama:11434
+  #     num_ctx: 65536
+  #   model_info:
+  #     kind: chat
+  #     purpose: 日本語の要約・テーマ抽出
+  #     context_length: 65536
+  #     thinking:
+  #       enabled_by_default: true
+  #       note: 思考は message.reasoning_content に入る。最終回答は message.content。
+  #       disable: 'リクエストボディに "think": false (または "reasoning_effort": "none")'
+  #       caution: /no_think は効かない。抑制しないと簡単な質問でも 1 万トークン超を思考に費やす
+  #     notes: VRAM 約 7.3GB(64k)
+  #
+  # 実体が未 pull のもの。有効化するには pull してからコメントを外し、gateway を再起動する。
   #   docker exec ai-hub-ollama ollama pull llama3.1:8b
   # - model_name: fast
   #   litellm_params:

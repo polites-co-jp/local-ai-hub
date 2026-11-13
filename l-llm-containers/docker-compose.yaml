@@ -1,9 +1,13 @@
 # ai-hub — LAN内ローカルLLM推論ハブ
-# 5コンテナ構成: ollama(GPU/非公開) + catalog(非公開) + gateway(LiteLLM/LAN公開) + chat + openclaw
+# 6コンテナ構成: ollama(GPU/非公開) + strata(GPU+RAM+SSD/大型MoE) + catalog(非公開)
+#               + gateway(LiteLLM/LAN公開) + chat + openclaw
 # 設計詳細は ../ARCHITECTURE.md を参照。
 
 services:
-  ollama:                          # container 1: 推論ランタイム(GPU占有)
+  ollama:                          # container 1: 推論ランタイム(埋め込み bge-m3 だけを常駐)
+    # 2026-11-13 から生成の主役は strata(論理名 large)。ollama の生成モデル(qwen3:14b /
+    # qwen3.5:9b)は重みを残したまま litellm.config.yaml で非公開にしている。GPU は strata と
+    # 共有するため、ここで生成モデルを常駐させると strata の専門家キャッシュが縮む。
     image: ollama/ollama:latest
     container_name: ai-hub-ollama
     restart: unless-stopped
@@ -34,7 +38,46 @@ services:
       start_period: 30s
     networks: [aihub]              # host ポート非公開 = ゲートウェイ経由でのみ到達
 
-  catalog:                         # container 2: モデルカタログAPI(host 非公開)
+  strata:                          # container 2: Strata(大型 MoE 推論エンジン。論理名 large)
+    # Qwen3.8-Flash-Next(125B / アクティブ 6B)を GPU・RAM・SSD の3層に分けて置く。
+    # 実測(2026-11-13, IQ3_S, 128k): 生成 50〜78 tok/s、prefill 1200〜1600 tok/s、RAM 約 55GB。
+    # 前提: ~/.wslconfig の memory を 104GB に上げてあること(既定 16GB では起動しない)。
+    # バージョンは固定し、上げるときは docs の手順(docs/DOCKER.md#updating)に従う。
+    image: ghcr.io/niko1221/strata:0.2.13-cuda13
+    container_name: ai-hub-strata
+    restart: unless-stopped
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      - FAMILY=qwen                # ISTA-DASLab の元パック
+      - MODEL=IQ3_S                # 54.8GB。96GB 以上の RAM 向けの最高品質
+      - CONTEXT=128k
+      - API_KEY=${STRATA_API_KEY}  # gateway と Web UI(:20803)からの呼び出しに必須(.env)
+      # bge-m3(約 0.7GB)が後から GPU に載れるよう VRAM を残す。残さないと Strata が
+      # 空きを専門家キャッシュで使い切り、GPU メモリが RAM に追い出されて数 tok/s に落ちる。
+      - STRATA_SET=vram-reserve-mib=1792
+    volumes:
+      # モデル(約 87GB)は名前付きボリューム = Docker のデータ領域(D: の NVMe)に置く。
+      # E: は HDD で SSD ストリーミングに使えないため、プロジェクト内バインドマウントの例外。
+      - strata_data:/data
+    ulimits:
+      memlock: -1                  # モデルの RAM を page-lock する
+    shm_size: 2g
+    stop_grace_period: 2m          # 既定 10 秒では大きなモデルの解放が間に合わない
+    # メモリ上限(mem_limit)は付けない。Strata は WSL VM 全体の RAM を前提に配置を決める。
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    ports:
+      - "20803:8080"               # Web UI / API の LAN 公開(Notion 台帳: 20803)。API キー必須
+    networks: [aihub]
+
+  catalog:                         # container 3: モデルカタログAPI(host 非公開)
     # 「実際に呼べるモデル」だけを返す。gateway の /model/info(ルーティング定義)と
     # ollama の /api/tags(pull 済み実体)を突合するため、両方に到達できる必要がある。
     # 外部へは gateway の pass-through(/v1/catalog)経由でのみ公開する。
@@ -47,6 +90,8 @@ services:
     environment:
       - GATEWAY_URL=http://gateway:4000
       - OLLAMA_URL=http://ollama:11434
+      - STRATA_URL=http://strata:8080              # large の実体が読み込み済みかを確かめる
+      - STRATA_API_KEY=${STRATA_API_KEY}
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}   # 自身でも Bearer を検証する
       - PORT=8080
     volumes:
@@ -54,7 +99,7 @@ services:
     command: ["python", "/app/server.py"]
     networks: [aihub]              # host ポート非公開
 
-  gateway:                         # container 3: LiteLLM Proxy(認証/ルーティング/ログ)
+  gateway:                         # container 4: LiteLLM Proxy(認証/ルーティング/ログ)
     image: ghcr.io/berriai/litellm:main-latest
     container_name: ai-hub-gateway
     restart: unless-stopped
@@ -69,12 +114,13 @@ services:
       - "20800:4000"
     environment:
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}   # .env から注入(コミットしない)
+      - STRATA_API_KEY=${STRATA_API_KEY}           # large(strata)へのルーティングで使う
     volumes:
       - ./litellm.config.yaml:/app/config.yaml:ro
     command: ["--config", "/app/config.yaml", "--port", "4000"]
     networks: [aihub]
 
-  chat:                            # container 4: チャット動作確認アプリ(薄いプロキシ + 静的UI)
+  chat:                            # container 5: チャット動作確認アプリ(薄いプロキシ + 静的UI)
     image: python:3.12-slim
     container_name: ai-hub-chat
     restart: unless-stopped
@@ -82,7 +128,7 @@ services:
     environment:
       - GATEWAY_URL=http://gateway:4000        # コンテナ内ネットワークで gateway に到達
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}  # 鍵はサーバ側のみ保持(ブラウザに渡さない)
-      - CHAT_MODEL=quality-next                # 既定の論理モデル名
+      - CHAT_MODEL=large                       # 既定の論理モデル名
       - PORT=8000
     volumes:
       - ./chat:/app:ro
@@ -91,8 +137,8 @@ services:
       - "20801:8000"               # チャットUI LAN公開(Notion 台帳: 20801)
     networks: [aihub]
 
-  openclaw:                        # container 5: OpenClaw(AIエージェント + Control UI)
-    # 推論は gateway 経由で quality-next を使う(GPU は使わない)。設定は ./openclaw/openclaw.json。
+  openclaw:                        # container 6: OpenClaw(AIエージェント + Control UI)
+    # 推論は gateway 経由で large を使う(GPU は使わない)。設定は ./openclaw/openclaw.json。
     # 設定形式の変更が多いプロジェクトなので、バージョンを固定して明示的に上げる。
     image: ghcr.io/openclaw/openclaw:2026.9.4
     container_name: ai-hub-openclaw
@@ -128,6 +174,8 @@ services:
 volumes:
   ollama_models:
   openclaw_state:
+  strata_data:
+    name: ai-hub-strata-data       # Phase 1 の試験で作ったボリュームをそのまま使う(再ダウンロード回避)
 
 networks:
   aihub:

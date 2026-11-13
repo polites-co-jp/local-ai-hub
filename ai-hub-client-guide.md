@@ -8,7 +8,7 @@ LAN内のローカルLLM推論ハブ **ai-hub** に外部アプリケーショ�
 ## 1. 前提(3行で)
 
 - ai-hub は **OpenAI 互換 API のエンドポイント1つ**の裏に、生成モデルと埋め込みモデルを束ねた共有推論サービス。
-- クライアントは**論理モデル名**(`quality` / `quality-next` / `embed`)だけを指定する。実体モデルはハブ側で隠蔽され、差し替えられてもクライアントは無変更でよい。
+- クライアントは**論理モデル名**(`large` / `embed`)だけを指定する。実体モデルはハブ側で隠蔽され、差し替えられてもクライアントは無変更でよい。
 - **ステートレス。** サーバは会話を覚えない。履歴はクライアントが保持し、毎回 `messages` に全文を入れて送る。
 
 ## 2. 接続情報
@@ -59,9 +59,10 @@ curl $AI_HUB_URL/v1/catalog -H "Authorization: Bearer $AI_HUB_KEY"
 
 | 論理名 | 用途 | 思考(thinking)の扱い |
 |---|---|---|
-| `quality` | 要約・分類・タグ付け・生成全般(高品質) | 既定で思考する。止めるにはユーザメッセージ末尾に `/no_think` |
-| `quality-next` | 日本語の要約・テーマ抽出(qualityの後継候補) | 既定で思考する。**`/no_think` は効かない。** ボディに `"think": false` を入れる |
+| `large` | 生成全般(要約・抽出・分類・コード・tool call・エージェント実行)。125B MoE、文脈 128k | **既定で思考しない。** 考えさせたいときだけボディに `"reasoning_effort": "low"` / `"medium"` / `"high"` |
 | `embed` | 類似検索・関連リンク用の埋め込み | ―(次元 **1024** 固定) |
+
+> 2026-11-13 に `quality` / `quality-next` は廃止し、`large` に統合した。旧名を呼ぶと 400 になる。
 
 ## 5. 呼び出し方
 
@@ -79,13 +80,17 @@ history = [
     {"role": "user", "content": "……を3行で要約して"},
 ]
 resp = client.chat.completions.create(
-    model="quality-next",
+    model="large",
     messages=history,
-    max_tokens=2048,
-    extra_body={"think": False},   # Qwen3.5 系の思考抑制(/no_think は効かない)
+    max_tokens=2048,               # 既定で思考しないので、そのまま回答に使われる
 )
 print(resp.choices[0].message.content)
 # 次のターンは history に assistant 応答と次の user 発話を append して全文を再送する
+
+# 難しい問題だけ考えさせる(思考は message.reasoning_content に入る)
+resp = client.chat.completions.create(
+    model="large", messages=history, max_tokens=8192, reasoning_effort="medium",
+)
 ```
 
 ### 5-2. 生成(curl)
@@ -94,7 +99,7 @@ print(resp.choices[0].message.content)
 curl -X POST $AI_HUB_URL/v1/chat/completions \
   -H "Authorization: Bearer $AI_HUB_KEY" -H "Content-Type: application/json" \
   --data-binary @- <<'JSON'
-{"model":"quality-next","think":false,
+{"model":"large",
  "messages":[{"role":"user","content":"日本の首都は?"}],"max_tokens":256}
 JSON
 ```
@@ -118,11 +123,11 @@ vectors = [d.embedding for d in resp.data]   # 各要素は長さ 1024 の float
 
 ## 6. 必ず守る挙動・制約
 
-1. **thinking モデルの応答構造:** 思考過程は `message.reasoning_content`、最終回答は `message.content` に入る。**`max_tokens` が小さいと思考の途中で打ち切られ `content` が空になる**。生成では `max_tokens` を 1024 以上(推奨 2048)取り、`content` が空のケースを扱うこと。
-2. **思考の止め方はモデルごとに違う**(§4 の表)。カタログの `thinking.disable` に従う。`quality-next` は抑制しないと簡単な質問でも1万トークン超を思考に費やす。
-3. **コンテキスト窓 = 32,768 トークン**(入力 + 思考 + 出力の合計)。「履歴全文 + max_tokens」がこれに収まるように送る。
-4. **GPU 1枚 = 実質直列。** 同時リクエストは順番待ちになる。クライアント側で同時実行数を絞る。
-5. **タイムアウトは 60〜120 秒以上。** モデルのコールドスタート(数十秒)や長文生成があるため。別の生成モデルに切り替えた直後は特に遅い(モデル積み替えが起きる)。頻繁なモデル往復は避ける。
+1. **思考の応答構造:** `reasoning_effort` で思考を有効にすると、思考過程は `message.reasoning_content`、最終回答は `message.content` に入る。**`max_tokens` が小さいと思考の途中で打ち切られ `content` が空になる**。思考を有効にするときは `max_tokens` を 4096 以上取り、`content` が空のケースを扱うこと。
+2. **思考の扱いはカタログの `thinking` に従う**(§4 の表)。`large` は既定で思考しない(ハブが `"reasoning_effort": "none"` を補う)。
+3. **コンテキスト窓 = 131,072 トークン**(入力 + 思考 + 出力の合計)。「履歴全文 + max_tokens」がこれに収まるように送る。
+4. **`large` は1リクエストずつ処理する。** 同時リクエストは順番待ちになる。クライアント側で同時実行数を絞る。
+5. **長文入力は読み込みに時間がかかる。** 読み込み速度は約 1200〜1700 トークン/秒(1.5 万トークンで約 10 秒、10 万トークンなら1分以上)。生成は 50〜78 トークン/秒。**タイムアウトは 120 秒以上、長文なら 600 秒**にする。
 6. **OpenAI 互換だが実体はローカルモデル。** OpenAI 固有の未対応パラメータはサーバ側で無視される。`temperature` / `top_p` / `max_tokens` / `stream` は有効。
 
 ## 7. エラー早見表
@@ -131,10 +136,10 @@ vectors = [d.embedding for d in resp.data]   # 各要素は長さ 1024 の float
 |---|---|---|
 | 401 | キー無し/誤り | `Authorization: Bearer <正しいキー>` を付ける |
 | 400 `model=None ...` | `model` 未指定 or JSON ボディ不正(文字化け含む) | `model` を指定。Content-Type と文字コードを確認(§5-2) |
-| 400 `Invalid model name` | 論理名のタイプミス | `/v1/catalog` で正しい `id` を確認 |
+| 400 `Invalid model name` | 論理名のタイプミス、または廃止した `quality` / `quality-next` を指定 | `/v1/catalog` で正しい `id` を確認(生成は `large`) |
 | 500 `model 'xxx' not found` | 論理名はあるが実体が未取得 | `/v1/catalog` に載っているモデルだけを使う。載っていなければハブ管理者に連絡 |
-| 500 `cudaMalloc failed: out of memory` | VRAM 不足(特に `quality`) | リトライ、または `quality-next` に切替 |
-| 502 / タイムアウト | モデルロード中・長文生成・GPU 混雑 | タイムアウト延長・リトライ |
+| 500 / 502(`large`) | Strata の起動中・再起動中(起動に約1分) | `/v1/catalog` に `large` が戻るのを待ってリトライ |
+| タイムアウト | 長文入力の読み込み・長文生成・他のリクエストの順番待ち | タイムアウト延長・リトライ |
 
 ## 8. 接続確認(最初にこの3つを実行)
 
@@ -143,7 +148,7 @@ curl $AI_HUB_URL/health/liveliness                                    # 1) キ�
 curl $AI_HUB_URL/v1/catalog -H "Authorization: Bearer $AI_HUB_KEY"    # 2) モデル一覧が返る
 curl -X POST $AI_HUB_URL/v1/chat/completions \
   -H "Authorization: Bearer $AI_HUB_KEY" -H "Content-Type: application/json" \
-  -d '{"model":"quality-next","think":false,"messages":[{"role":"user","content":"ping"}],"max_tokens":64}'
+  -d '{"model":"large","messages":[{"role":"user","content":"ping"}],"max_tokens":64}'
 ```
 
 3つとも通れば実装に進んでよい。
@@ -153,7 +158,7 @@ curl -X POST $AI_HUB_URL/v1/chat/completions \
 - [ ] `AI_HUB_URL` / `AI_HUB_KEY` を環境変数で受け取る(ハードコード禁止・`.env` は `.gitignore`)
 - [ ] 起動時に `/v1/catalog` でモデルを確認(カタログに無い `id` は呼ばない)
 - [ ] 会話履歴を自前で保持し、毎回 `messages` に全文を入れて送る
-- [ ] HTTP タイムアウト 60〜120 秒以上、同時リクエスト数を絞る
-- [ ] thinking モデル: `max_tokens` を十分に取り、`reasoning_content` の存在と `content` が空のケースを扱う
-- [ ] 思考の止め方をモデルごとに使い分ける(`quality`=`/no_think`、`quality-next`=`"think": false`)
+- [ ] HTTP タイムアウト 120 秒以上(長文入力なら 600 秒)、同時リクエスト数を絞る(`large` は1件ずつ処理)
+- [ ] 思考を有効にするとき: `max_tokens` を十分に取り、`reasoning_content` の存在と `content` が空のケースを扱う
+- [ ] 思考は必要なときだけ `reasoning_effort` で有効にする(既定は思考なし)
 - [ ] 埋め込みは次元 **1024** で索引を設計

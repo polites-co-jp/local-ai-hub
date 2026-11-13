@@ -15,5 +15,6 @@
 | 20800 | 4000 | `ai-hub-gateway`(LiteLLM Proxy。推論API) | LAN |
 | 20801 | 8000 | `ai-hub-chat`(動作確認チャットUI) | LAN |
 | 20802 | 18789 | `ai-hub-openclaw`(OpenClaw Control UI / Gateway) | LAN |
+| 20803 | 8080 | `ai-hub-strata`(Strata Web UI / API。API キー必須) | LAN |
 
-`ai-hub-ollama`(11434)と `ai-hub-catalog`(8080)はホストへ公開しない。20803-20899 は予備。
+`ai-hub-ollama`(11434)と `ai-hub-catalog`(8080)はホストへ公開しない。20804-20899 は予備。

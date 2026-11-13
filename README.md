@@ -2,7 +2,8 @@
 
 LAN内の汎用ローカルLLM推論ハブ。GPU搭載マシン上で、**OpenAI互換APIのエンドポイント1つ**の裏にローカルLLM(生成)と埋め込みモデルを束ねて提供する共有サービスです。
 
-- クライアントは**論理モデル名**(`quality` / `quality-next` / `embed`)だけを指定。実体(`qwen3:14b` 等)はハブ側で隠蔽し、差し替えてもクライアントは無変更。
+- クライアントは**論理モデル名**(`large` / `embed`)だけを指定。実体(`qwen3.8-flash-next-iq3_s` 等)はハブ側で隠蔽し、差し替えてもクライアントは無変更。
+- 生成の `large` は **Qwen3.8-Flash-Next(125B MoE / アクティブ 6B)**。推論エンジン [Strata](https://github.com/Niko1221/Strata) が GPU・RAM・SSD の3層に専門家を置くので、16GB の GPU + 128GB の RAM で 50〜78 tok/s が出ます。
 - **ステートレス**。会話履歴はクライアントが保持し、毎回まるごと送る。サーバに記憶はない。
 - 公開範囲は**プライベートLAN内のみ**(インターネット非公開)。アクセス制御はAPIキー(LiteLLM master key)。
 - アプリ固有ロジック(取り込み・推薦等)はクライアント側の責務。ハブは「推論を返す」だけ。
@@ -10,32 +11,33 @@ LAN内の汎用ローカルLLM推論ハブ。GPU搭載マシン上で、**OpenAI
 ## 構成
 
 ```
-[LAN内クライアント] ──▶ gateway(LiteLLM :20800, APIキー認証) ──▶ ollama(GPU, 内部のみ)
-                              │
+[LAN内クライアント] ──▶ gateway(LiteLLM :20800, APIキー認証) ─┬─▶ strata(large, GPU+RAM+NVMe)
+                              │                                └─▶ ollama(embed, GPU, 内部のみ)
                               └─ /v1/catalog ──▶ catalog(実際に呼べるモデルを返す)
 ```
 
-5コンテナ構成(定義は [l-llm-containers/docker-compose.yaml](l-llm-containers/docker-compose.yaml))。
+6コンテナ構成(定義は [l-llm-containers/docker-compose.yaml](l-llm-containers/docker-compose.yaml))。
 
 | コンテナ | 役割 | ポート | 公開 |
 |---|---|---|---|
-| `ai-hub-ollama` | 推論ランタイム(GPU占有)。OpenAI互換 | `11434`(内部のみ) | 非公開 |
+| `ai-hub-ollama` | 埋め込みランタイム(bge-m3 を常駐) | `11434`(内部のみ) | 非公開 |
+| `ai-hub-strata` | 生成ランタイム(Strata。論理名 `large`)と Web UI | host `20803` | LAN公開(API キー必須) |
 | `ai-hub-catalog` | モデルカタログAPI。実際に呼べるモデルだけを返す | `8080`(内部のみ) | 非公開(gateway経由) |
-| `ai-hub-gateway` | LiteLLM Proxy。推論APIの唯一の窓口。認証/論理名ルーティング/ログ | host `20800` | LAN公開 |
-| `ai-hub-chat` | 動作確認用の薄いチャットUI(既定モデル `quality-next`) | host `20801` | LAN公開 |
-| `ai-hub-openclaw` | OpenClaw(AIエージェント)と管理画面 Control UI。gateway 経由で `quality-next` を使う | host `20802` | LAN公開 |
+| `ai-hub-gateway` | LiteLLM Proxy。推論APIの窓口。認証/論理名ルーティング/ログ | host `20800` | LAN公開 |
+| `ai-hub-chat` | 動作確認用の薄いチャットUI(既定モデル `large`) | host `20801` | LAN公開 |
+| `ai-hub-openclaw` | OpenClaw(AIエージェント)と管理画面 Control UI。gateway 経由で `large` を使う | host `20802` | LAN公開 |
 
-実行環境: Windows 11 + NVIDIA RTX 5060 Ti 16GB / Docker Desktop(WSL2)+ NVIDIA Container Toolkit。
+実行環境: Windows 11 + Ryzen 9 7950X + RAM 128GB + NVIDIA RTX 5060 Ti 16GB / Docker Desktop(WSL2)+ NVIDIA Container Toolkit。
 
 ## クイックスタート
 
 ```powershell
+# 前提: ~/.wslconfig の [wsl2] に memory=104GB を設定し、wsl --shutdown 済み
 cd l-llm-containers
-Copy-Item .env.example .env    # LITELLM_MASTER_KEY を設定
-docker compose up -d
+Copy-Item .env.example .env    # LITELLM_MASTER_KEY / OPENCLAW_GATEWAY_TOKEN / STRATA_API_KEY を設定
+docker compose up -d           # 初回は Strata がモデル(約 85GB)をダウンロードする
 
-# モデル取得(compose では自動化されない。手動 pull が必要)
-docker exec ai-hub-ollama ollama pull qwen3:14b   # quality
+# 埋め込みモデル取得(ollama 側は compose では自動化されない。手動 pull が必要)
 docker exec ai-hub-ollama ollama pull bge-m3      # embed
 
 # 疎通確認
@@ -50,9 +52,9 @@ curl http://localhost:20800/health/liveliness
 from openai import OpenAI
 client = OpenAI(base_url="http://<ハブのLAN IP>:20800/v1", api_key="<LITELLM_MASTER_KEY>")
 
-# 生成
+# 生成(既定で思考しない)
 r = client.chat.completions.create(
-    model="quality",
+    model="large",
     messages=[{"role": "user", "content": "……を3行で要約して"}],
     max_tokens=2048,
 )
@@ -62,7 +64,7 @@ print(r.choices[0].message.content)
 v = client.embeddings.create(model="embed", input="テキスト").data[0].embedding
 ```
 
-> **注意**: `quality` 等は思考(thinking)モデルです。思考の止め方や `max_tokens` の注意点はモデルごとに異なるため、`GET /v1/catalog` が返す `thinking` フィールドに従ってください。`/v1/models` は未 pull のモデルも返すため、**実際に呼べるモデルの一覧は `/v1/catalog`** を使います。
+> **注意**: `large` は既定で思考しません。考えさせたいときだけ `reasoning_effort="low" / "medium" / "high"` を付けます。処理は1リクエストずつで、長文の入力は読み込みに時間がかかります。`/v1/models` は実体の状態を見ないため、**実際に呼べるモデルの一覧は `/v1/catalog`** を使います。
 
 ## ドキュメント
 
@@ -75,6 +77,7 @@ v = client.embeddings.create(model="embed", input="テキスト").data[0].embedd
 
 ## セキュリティ
 
-- ollama は直接LANに公開しない。外部窓口は gateway(`:20800`)ただ1つ。
-- master key は `l-llm-containers/.env` のみで管理(`.gitignore` 済み。コミット禁止)。
+- ollama は直接LANに公開しない。推論APIの窓口は gateway(`:20800`)。
+- Strata の Web UI(`:20803`)は LAN に出しているが、API キー(`STRATA_API_KEY`)が無いと API は 401。
+- 鍵は `l-llm-containers/.env` のみで管理(`.gitignore` 済み。コミット禁止)。
 - ルータでポート転送しない / ファイアウォールでWANを遮断し、「LAN内のみ」を担保する。

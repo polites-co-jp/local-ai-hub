@@ -7,6 +7,7 @@ LiteLLM の /v1/models は設定ファイルに書かれた論理名を返すだ
 
   1. gateway /model/info  … 論理名 → 実体 のルーティング定義(litellm.config.yaml 由来)
   2. ollama /api/tags     … 実際に pull 済みの実体
+  3. strata /v1/models    … Strata に読み込まれて応答できる実体(api_base が STRATA_URL のもの)
 
 外部公開は gateway(:20800) の pass-through 経由。認証はゲートウェイ任せにせず
 本サービス自身でも master key を検証する(pass-through の auth は Enterprise 機能で
@@ -23,6 +24,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 GATEWAY = os.environ.get("GATEWAY_URL", "http://gateway:4000").rstrip("/")
 OLLAMA = os.environ.get("OLLAMA_URL", "http://ollama:11434").rstrip("/")
+STRATA = os.environ.get("STRATA_URL", "").rstrip("/")
+STRATA_KEY = os.environ.get("STRATA_API_KEY", "")
 KEY = os.environ.get("LITELLM_MASTER_KEY", "")
 PORT = int(os.environ.get("PORT", "8080"))
 TIMEOUT = float(os.environ.get("UPSTREAM_TIMEOUT", "30"))
@@ -59,10 +62,27 @@ def _normalize_backend(litellm_model):
     return name if ":" in name else name + ":latest"
 
 
+def _is_strata(params):
+    base = (params.get("api_base") or "").rstrip("/")
+    return bool(STRATA) and base.startswith(STRATA)
+
+
+def _strata_models():
+    """Strata が応答できるモデル ID の集合。落ちている・読み込み中なら空集合(= 未提供扱い)。"""
+    if not STRATA:
+        return set()
+    try:
+        data = _get_json(STRATA + "/v1/models", STRATA_KEY)
+    except (urllib.error.URLError, OSError, ValueError):
+        return set()
+    return {m.get("id") for m in data.get("data", []) if m.get("id")}
+
+
 def build_catalog(include_uninstalled=False):
-    """ルーティング定義と pull 済み実体を突合してカタログを組み立てる。"""
+    """ルーティング定義と、実際に提供できる実体を突合してカタログを組み立てる。"""
     info = _get_json(GATEWAY + "/model/info", KEY)
     tags = _get_json(OLLAMA + "/api/tags")
+    strata_ids = None  # Strata を参照する論理名があるときだけ問い合わせる
 
     installed = {}
     for m in tags.get("models", []):
@@ -77,8 +97,17 @@ def build_catalog(include_uninstalled=False):
         raw_meta = row.get("model_info") or {}
         meta = {k: raw_meta[k] for k in META_KEYS if raw_meta.get(k) is not None}
 
-        backend = _normalize_backend(params.get("model"))
-        hit = installed.get(backend)
+        if _is_strata(params):
+            if strata_ids is None:
+                strata_ids = _strata_models()
+            model = params.get("model") or ""
+            backend = model.split("/", 1)[1] if "/" in model else model
+            hit = {} if backend in strata_ids else None
+            missing = "backend model '%s' is not loaded on the strata runtime" % backend
+        else:
+            backend = _normalize_backend(params.get("model"))
+            hit = installed.get(backend)
+            missing = "backend model '%s' is not pulled on the ollama runtime" % backend
         kind = raw_meta.get("kind") or "chat"
 
         entry = {
@@ -91,11 +120,10 @@ def build_catalog(include_uninstalled=False):
             "backend": backend,
         }
         if hit is not None:
-            entry["backend_size_bytes"] = hit.get("size")
+            if hit.get("size") is not None:
+                entry["backend_size_bytes"] = hit.get("size")
         else:
-            entry["unavailable_reason"] = (
-                "backend model '%s' is not pulled on the ollama runtime" % backend
-            )
+            entry["unavailable_reason"] = missing
         entry.update(meta)  # purpose / context_length / thinking / dimensions など
         entries.append(entry)
 
@@ -157,8 +185,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    print("catalog api listening on :%d (gateway=%s, ollama=%s)" % (PORT, GATEWAY, OLLAMA),
-          flush=True)
+    print("catalog api listening on :%d (gateway=%s, ollama=%s, strata=%s)"
+          % (PORT, GATEWAY, OLLAMA, STRATA or "-"), flush=True)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
 
 
